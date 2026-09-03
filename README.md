@@ -241,6 +241,33 @@ be copied onto the rig by hand), owned by `nebula-sifr0` — nebula reads them
 after dropping privileges. Then add the address to the `hosts` map in
 `modules/base/nebula.nix` so the rest of the fleet can use the name.
 
+## Laptop rigs
+
+A rig that is a laptop should say so:
+
+```nix
+rigs.rig.isLaptop = true;
+```
+
+Its charger is the nearest one for somebody to borrow, and its lid is the
+obvious thing to close on a machine that looks idle — and a rig ignores both,
+so a job keeps running with a hidden screen and a draining battery. With this
+on, `rig-alarm` beeps out of the laptop's own speaker every few seconds while
+the rig is off mains or has its lid shut. Nothing suspends or throttles; the
+alarm is the whole of it.
+
+One episode of beeping lasts five minutes and then goes quiet, so a rig nobody
+came to is not left making a noise all weekend — it keeps watching, and a new
+fault, or the same one clearing and returning, gets a fresh five minutes.
+`RIG_ALARM_TIMEOUT` in the unit's environment changes that; 0 never stops.
+
+To check what the sensors say without waiting for a beep:
+
+```
+RIG_ALARM_DRY_RUN=1 rig-alarm     # prints "ok", "unplugged", "lid closed"
+systemctl stop rig-alarm          # silence it while working on the machine
+```
+
 ## Upgrades
 
 Every rig runs `nixos-upgrade` nightly at 01:30 (plus up to 45 minutes of

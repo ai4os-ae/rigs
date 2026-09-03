@@ -29,20 +29,27 @@ let
 
   # `services.cage.program` is a single path, so the flags live in a wrapper
   # rather than being smuggled into it as a string with spaces.
+  #
+  # `--app=` is what actually removes the browser UI. `--kiosk` alone does not
+  # under Ozone/Wayland — Chromium 152 accepts the flag and still draws the tab
+  # strip and the address bar, which is exactly the "kiosk" that isn't one.
+  # An app window has no chrome to begin with, so there is nothing left to
+  # suppress. The URL goes in the flag; passing it positionally as well would
+  # open a second window behind this one.
   browser = pkgs.writeShellScript "kiosk-chromium" ''
     exec ${lib.getExe cfg.browser} \
+      --app=${lib.escapeShellArg cfg.url} \
       --kiosk \
+      --start-fullscreen \
       --ozone-platform=wayland \
       --user-data-dir=${cfg.stateDir}/chromium \
       --disk-cache-dir=${cfg.stateDir}/cache \
       --no-first-run \
       --noerrdialogs \
-      --disable-infobars \
       --disable-features=TranslateUI \
       --disable-session-crashed-bubble \
       --disable-restore-session-state \
-      --hide-crash-restore-bubble \
-      ${lib.escapeShellArg cfg.url}
+      --hide-crash-restore-bubble
   '';
 in
 {
@@ -260,6 +267,19 @@ in
       after = [ "rig-kiosk-server.socket" ];
       wants = [ "rig-kiosk-server.socket" ];
 
+      # Upstream wants this from graphical.target only. That target is not
+      # active on a rig that was running an older configuration when the
+      # nightly upgrade switched it, and the switch then stops the session and
+      # hands tty1 back to getty — a rig whose screen goes blank until somebody
+      # reboots it. Being wanted by multi-user.target too means it comes back
+      # in either case.
+      wantedBy = [ "multi-user.target" ];
+
+      # Upstream also sets restartIfChanged = false, which for a login session
+      # is right and for a kiosk is not: it means a rebuild that changes what
+      # is on screen leaves the old page up until the next reboot.
+      restartIfChanged = lib.mkForce true;
+
       # Nobody is going to notice a browser that died at 3am, let alone restart
       # it, so the unit does that itself. The compositor holds tty1 either way.
       serviceConfig = {
@@ -267,6 +287,22 @@ in
         RestartSec = "5s";
       };
     };
+
+    # The compositor and getty both want tty1, and upstream settles that with
+    # Conflicts=getty@tty1.service — which is bidirectional. Anything that
+    # starts the getty therefore *stops the kiosk*, and a rebuild does exactly
+    # that: the switch pulls getty@tty1 in, the screen goes back to a login
+    # prompt, and systemd will not restart a unit that a conflict stopped. So
+    # tty1 belongs to the kiosk and to nothing else.
+    #
+    # Consoles are not lost: tty2 through tty6 still spawn a getty on demand,
+    # which is the way in if the compositor itself is what is broken.
+    #
+    # Both names, because they are the same template reached two ways: logind
+    # spawns autovt@tty1, which upstream's Conflicts= line does not name, so
+    # disabling only getty@tty1 moves the problem rather than fixing it.
+    systemd.services."getty@tty1".enable = false;
+    systemd.services."autovt@tty1".enable = false;
 
     users.users.${cfg.user} = {
       description = "Kiosk display session";
@@ -278,6 +314,12 @@ in
 
       home = cfg.stateDir;
       createHome = true;
+
+      # Without this there is no `systemd --user` for the account, and every
+      # rebuild ends with "user activation for kiosk failed" and a non-zero
+      # exit — which on a rig means the nightly upgrade reports failure every
+      # night for a session that is, in fact, running perfectly.
+      linger = true;
 
       # No password, no keys, and the system-user default shell (nologin). The
       # session is started by systemd at boot and its PAM stack runs no auth

@@ -149,8 +149,12 @@ in
           openssh.authorizedKeys.keys = u.sshKeys;
         }
         // (
-          if cfg.bootstrap && u.admin then
-            { hashedPassword = bootstrapPassword; }
+          # In bootstrap mode no secret can be decrypted at all, so
+          # passwordSecret is not consulted even when it is set: the admin
+          # placeholder is the only password that exists, and everybody else is
+          # locked until the rig has an age key.
+          if cfg.bootstrap then
+            (if u.admin then { hashedPassword = bootstrapPassword; } else { hashedPassword = "!"; })
           else if u.passwordSecret != null then
             { hashedPasswordFile = config.sops.secrets.${u.passwordSecret}.path; }
           else
@@ -158,6 +162,27 @@ in
         )
       ) (filterAttrs (_: u: u.enable) cfg.users);
     };
+
+    # Declared here rather than per-host because the roster is fleet-wide: a
+    # person named in people.nix has the same account, and the same password,
+    # on every rig.
+    #
+    # neededForUsers is the load-bearing part. Accounts are created early in
+    # activation, before ordinary secrets are decrypted into /run/secrets, so a
+    # hashedPasswordFile pointing at one of those names a file that does not
+    # exist yet — and the account comes up unusable in a way that reads like a
+    # bad hash rather than an ordering problem. neededForUsers secrets are
+    # decrypted ahead of that step into /run/secrets-for-users instead.
+    #
+    # They are root-owned by construction, which is why there is no `owner`
+    # here as there is on the wifi and nebula secrets: those are read by
+    # unprivileged daemons after startup, this one is read by the activation
+    # script as root.
+    sops.secrets = lib.mkIf (!cfg.bootstrap) (
+      cfg.users
+      |> filterAttrs (_: u: u.enable && u.passwordSecret != null)
+      |> lib.mapAttrs' (_: u: lib.nameValuePair u.passwordSecret { neededForUsers = true; })
+    );
 
     warnings = lib.optional cfg.bootstrap ''
       rigs.bootstrap is enabled on ${config.networking.hostName}: admin accounts

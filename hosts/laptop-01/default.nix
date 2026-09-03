@@ -41,6 +41,11 @@
     rig.enable = true;
     autoupgrade.enable = true;
 
+    # A Latitude on a desk in a shared room: the charger is the nearest one to
+    # borrow and the lid is the obvious thing to close on a machine that looks
+    # idle. Both now beep until they are put back.
+    rig.isLaptop = true;
+
     # The laptop's own panel, which is otherwise a lid nobody opens: cage takes
     # tty1 at boot and shows the rig's name. No getty, no login prompt.
     kiosk.enable = true;

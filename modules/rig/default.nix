@@ -3,7 +3,10 @@ let
   cfg = config.rigs.rig;
 in
 {
-  imports = [ ./kiosk.nix ];
+  imports = [
+    ./kiosk.nix
+    ./laptop.nix
+  ];
 
   options.rigs.rig = {
     enable = lib.mkEnableOption "rig behaviour: unattended, always-on, runs jobs";

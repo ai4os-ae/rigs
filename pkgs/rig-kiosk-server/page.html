@@ -330,11 +330,36 @@
 
         font-size: clamp(2.5rem, 6vw, 6rem);
         font-weight: 600;
-        letter-spacing: 0.14em;
         /* Not full white: this is the only thing on screen for a minute, and
            it should read as resting rather than as an alert. */
         color: rgba(234, 242, 255, 0.88);
         text-shadow: 0 0 60px rgba(255, 255, 255, 0.18);
+      }
+
+      .bouncer .mark {
+        display: block;
+        letter-spacing: 0.14em;
+      }
+
+      /* Set to the width of the name above it. The bouncer is a fixed-position
+         box, so it is only as wide as its widest child — the name — and
+         justifying the last (only) line of this one spreads it across exactly
+         that. */
+      .bouncer .note {
+        display: block;
+        margin-top: 0.5em;
+        text-align: justify;
+        text-align-last: justify;
+
+        font-size: 0.2em;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        /* Warm white rather than the red used on the readings page: this has
+           to stay legible when the field behind it is orange, and red on
+           orange is the one combination that does not. */
+        color: rgba(255, 240, 235, 0.78);
+        text-shadow: none;
       }
 
       body.screensaver .bouncer {
@@ -414,7 +439,10 @@
       <p class="meta"><span id="time">{{ .Time }}</span> · booted <span id="booted">{{ .BootedAt }}</span></p>
     </footer>
 
-    <div class="bouncer" id="bouncer" aria-hidden="true">AI4OS</div>
+    <div class="bouncer" id="bouncer" aria-hidden="true">
+      <span class="mark">AI4OS</span>
+      {{ if .Warning }}<span class="note">Do Not Unplug</span>{{ end }}
+    </div>
 
     {{ if .HasQR }}
       <figure class="qr">
