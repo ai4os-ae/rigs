@@ -12,6 +12,13 @@
       fullname = "Humaid Alqasimi";
       uid = 1000;
       admin = true;
+
+      # For the console and for `su`. SSH stays key-only regardless — see
+      # PasswordAuthentication in ssh.nix — so this is not a second way in over
+      # the network, it is what makes the machine usable at the keyboard when
+      # the network is the thing that broke.
+      passwordSecret = "passwords/humaid";
+
       sshKeys = [
         # FIDO tokens, carried over from the personal dotfiles repo. Confirm
         # these are the pair you want the rigs to accept before the first

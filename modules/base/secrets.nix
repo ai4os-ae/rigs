@@ -1,16 +1,13 @@
-{ inputs, lib, ... }:
-let
-  # Guarded because the file does not exist until the first secret is created,
-  # and a `sops.defaultSopsFile` pointing at a missing path fails evaluation —
-  # which would make the repository unbuildable before it has any secrets at
-  # all. Drop the guard once secrets/all.yaml is committed.
-  allSecrets = ../../secrets/all.yaml;
-in
+{ inputs, ... }:
 {
   imports = [ inputs.sops-nix.nixosModules.sops ];
 
   sops = {
-    defaultSopsFile = lib.mkIf (builtins.pathExists allSecrets) allSecrets;
+    # Secrets shared by every rig — currently the account password hashes,
+    # which follow the roster in people.nix and so are fleet-wide by the same
+    # logic. Per-rig material names its own file instead; see the nebula and
+    # wifi secrets on laptop-01.
+    defaultSopsFile = ../../secrets/all.yaml;
     defaultSopsFormat = "yaml";
 
     # Derived from the rig's SSH host key rather than generated separately, so
