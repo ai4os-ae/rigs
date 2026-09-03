@@ -1,0 +1,43 @@
+# Recipients for each secrets file.
+#
+# Host keys are the age form of each rig's SSH host key:
+#
+#   ssh-to-age < /etc/ssh/ssh_host_ed25519_key.pub
+#
+# Admin keys are personal age identities, so a human can decrypt and re-encrypt
+# without going through a rig. After editing this file, re-encrypt everything
+# it covers with `sops updatekeys secrets/<file>.yaml`.
+keys:
+  # Admins.
+  #
+  # At least one admin recipient must be on every rule. Rigs can only decrypt
+  # their own secrets, and a rig's identity dies with its disk — reinstall one
+  # with no admin on the rule and the secrets are unrecoverable.
+  #
+  # This is humaid's personal age identity, the same one the dotfiles repo uses
+  # (its `&anoa` recipient). It lives at ~/.config/sops/age/keys.txt, owned by
+  # the user, so `sops secrets/...` works from anoa without sudo. It is NOT
+  # derived from an SSH key: humaid's SSH keys are all sk-ssh-ed25519 FIDO
+  # tokens, whose private scalar never leaves the YubiKey and which ssh-to-age
+  # therefore cannot convert.
+  - &humaid-anoa age1ec70anc9j3tt7r2t24t9gchpf3c5hm6k9drx43v9wmn5xyvzfufs3repxd
+
+  # Rigs. Unlike the above these ARE derived from the host's SSH host key, per
+  # `age.sshKeyPaths` in modules/base/secrets.nix — so a rig's key only exists
+  # once it has been installed and generated a host key.
+  - &laptop-01 age1cmstz280tqq2s5ukrl7x78974k7fz2dsshp6stcflhyut7fdfgqs7pmhlk
+
+creation_rules:
+  # Shared across every rig.
+  - path_regex: secrets/all\.yaml$
+    key_groups:
+      - age:
+          - *humaid-anoa
+          - *laptop-01
+
+  # Per-host secrets: only the rig itself and the admins can read them.
+  - path_regex: secrets/laptop-01\.yaml$
+    key_groups:
+      - age:
+          - *humaid-anoa
+          - *laptop-01

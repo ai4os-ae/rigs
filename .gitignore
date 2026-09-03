@@ -1,0 +1,19 @@
+result
+result-*
+*.iso
+*.qcow2
+
+# Wireless credentials baked into a throwaway installer image. A plaintext PSK
+# by necessity — see hosts/installer.nix — so it must never be committed.
+/secrets/installer-wifi.nix
+
+# Throwaway public keys added to an installer image for one install. Not secret
+# in themselves, but machine-specific scratch that should not accrete in git.
+/secrets/installer-keys.nix
+
+# Agent scratch and local editor state
+CLAUDE.md
+.claude/*
+!.claude/skills/
+.aider*
+.direnv/

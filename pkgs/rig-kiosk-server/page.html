@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ .Heading }} — {{ .Subheading }}</title>
+    <style>
+      :root {
+        --ink: #eaf2ff;
+        --muted: #93aed4;
+        --rule: rgba(147, 174, 212, 0.22);
+      }
+
+      /* Registered rather than plain custom properties so the browser knows
+         they are colours and can interpolate them. This is what lets the
+         screensaver move through blue, green, yellow and orange as one
+         continuous gradient rather than four steps. */
+      @property --base {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #04122e;
+      }
+
+      @property --glow-one {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #1e5ad8;
+      }
+
+      @property --glow-two {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #0e7fc4;
+      }
+
+      @property --glow-three {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #3f2fb0;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3.5rem;
+
+        background: var(--base);
+        color: var(--ink);
+        font-family: sans-serif;
+        overflow: hidden;
+
+        /* Catches the end of the screensaver: dropping the class would
+           otherwise snap four colours back to blue in one frame. */
+        transition:
+          --base 4s ease,
+          --glow-one 4s ease,
+          --glow-two 4s ease,
+          --glow-three 4s ease;
+
+        /* Nothing on this machine has a pointer, and nothing on the page is
+           meant to be selected or dragged. */
+        cursor: none;
+        user-select: none;
+      }
+
+      /* The background is three wide, heavily blurred discs of blue drifting
+         over the base colour. They animate on transform and opacity only, so
+         the compositor moves them and the CPU stays free for the jobs that are
+         the actual point of the machine. */
+      .field {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        overflow: hidden;
+      }
+
+      .glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(90px);
+        will-change: transform, opacity;
+      }
+
+      .glow.one {
+        width: 85vmax;
+        height: 85vmax;
+        top: -30vmax;
+        left: -25vmax;
+        background: radial-gradient(circle, var(--glow-one) 0%, transparent 68%);
+        opacity: 0.55;
+        animation: drift-one 71s ease-in-out infinite;
+      }
+
+      .glow.two {
+        width: 70vmax;
+        height: 70vmax;
+        bottom: -28vmax;
+        right: -20vmax;
+        background: radial-gradient(circle, var(--glow-two) 0%, transparent 70%);
+        opacity: 0.45;
+        animation: drift-two 89s ease-in-out infinite;
+      }
+
+      .glow.three {
+        width: 60vmax;
+        height: 60vmax;
+        top: 20vmax;
+        left: 35vmax;
+        background: radial-gradient(circle, var(--glow-three) 0%, transparent 72%);
+        opacity: 0.35;
+        animation: drift-three 113s ease-in-out infinite;
+      }
+
+      /* Long, prime-ish durations so the three never fall into step with each
+         other and the whole thing never visibly repeats. */
+      @keyframes drift-one {
+        0%,
+        100% {
+          transform: translate3d(0, 0, 0) scale(1);
+          opacity: 0.55;
+        }
+        50% {
+          transform: translate3d(14vmax, 9vmax, 0) scale(1.18);
+          opacity: 0.42;
+        }
+      }
+
+      @keyframes drift-two {
+        0%,
+        100% {
+          transform: translate3d(0, 0, 0) scale(1.05);
+          opacity: 0.45;
+        }
+        50% {
+          transform: translate3d(-16vmax, -11vmax, 0) scale(0.9);
+          opacity: 0.6;
+        }
+      }
+
+      @keyframes drift-three {
+        0%,
+        100% {
+          transform: translate3d(0, 0, 0) scale(0.95);
+          opacity: 0.3;
+        }
+        50% {
+          transform: translate3d(-12vmax, 14vmax, 0) scale(1.2);
+          opacity: 0.45;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .glow {
+          animation: none;
+        }
+      }
+
+      .title {
+        text-align: center;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(3rem, 9vw, 8rem);
+        font-weight: 600;
+        letter-spacing: -0.03em;
+        line-height: 1;
+      }
+
+      .subheading {
+        margin: 0.75rem 0 0;
+        font-size: clamp(1.5rem, 3.2vw, 3rem);
+        font-weight: 400;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+
+      .facts {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: clamp(2rem, 6vw, 6rem);
+        margin: 0;
+        padding: 2rem clamp(1rem, 4vw, 4rem) 0;
+        border-top: 1px solid var(--rule);
+      }
+
+      .fact {
+        text-align: center;
+      }
+
+      .fact dt {
+        font-size: clamp(0.75rem, 1.1vw, 1rem);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: var(--muted);
+      }
+
+      .fact dd {
+        margin: 0.6rem 0 0;
+        font-size: clamp(1.25rem, 2.4vw, 2.25rem);
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* A rig on wifi and a dock has more than one address; each gets a line. */
+      .fact dd .line {
+        display: block;
+      }
+
+      .fact dd .line + .line {
+        margin-top: 0.5rem;
+      }
+
+      .fact dd .iface {
+        display: block;
+        font-size: 0.55em;
+        font-weight: 400;
+        color: var(--muted);
+        letter-spacing: 0.08em;
+      }
+
+      footer {
+        position: fixed;
+        bottom: 1.75rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.9rem;
+        text-align: center;
+      }
+
+      /* Red on this background rather than pure red: #f00 on deep blue is hard
+         to read at a distance, which is the one thing this line has to be. */
+      .warning {
+        margin: 0;
+        color: #ff5f5f;
+        font-size: clamp(1rem, 1.9vw, 1.75rem);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      .meta {
+        margin: 0;
+        font-size: clamp(0.8rem, 1.2vw, 1.05rem);
+        color: var(--muted);
+        letter-spacing: 0.06em;
+      }
+
+      /* Bottom right, out of the way of the centred column. White card behind
+         it on purpose: a QR inverted or floated on a dark background is a
+         coin-flip on how well a given phone camera reads it. */
+      .qr {
+        position: fixed;
+        right: 2.25rem;
+        bottom: 2.25rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.55rem;
+      }
+
+      .qr img {
+        display: block;
+        width: clamp(88px, 9vw, 150px);
+        height: auto;
+        padding: 0.6rem;
+        border-radius: 0.6rem;
+        background: #ffffff;
+      }
+
+      .qr figcaption {
+        font-size: clamp(0.7rem, 0.95vw, 0.95rem);
+        color: var(--muted);
+        letter-spacing: 0.05em;
+      }
+
+      /* The page keeps showing the last good reading if polling stops; dimming
+         is what says it is no longer live, so nobody reads a stale uptime as a
+         current one. The warning is not a reading and never dims. */
+      body.stale .facts,
+      body.stale .meta {
+        opacity: 0.35;
+        transition: opacity 1s ease;
+      }
+
+      /* ---- Screensaver ----------------------------------------------------
+         Every so often the readings fade out and "AI4OS" drifts around the
+         panel on its own, so an OLED or a laptop backlight is not holding the
+         same bright text in the same pixels all week. It is a screensaver, so
+         it is built to be ignorable: nothing flashes, nothing snaps, and any
+         key or movement puts the readings straight back. */
+      .title,
+      .facts,
+      footer,
+      .qr {
+        transition: opacity 2.5s ease;
+      }
+
+      body.screensaver .title,
+      body.screensaver .facts,
+      body.screensaver footer,
+      body.screensaver .qr {
+        opacity: 0;
+      }
+
+      body.screensaver {
+        animation-name: calm-hues;
+        animation-timing-function: linear;
+        /* Duration is set from the page's configured screensaver length, so
+           one run is exactly one loop: it leaves blue and arrives back at blue
+           just as the readings return. */
+      }
+
+      .bouncer {
+        position: fixed;
+        top: 0;
+        left: 0;
+        opacity: 0;
+        transition: opacity 2.5s ease;
+        will-change: transform;
+
+        font-size: clamp(2.5rem, 6vw, 6rem);
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        /* Not full white: this is the only thing on screen for a minute, and
+           it should read as resting rather than as an alert. */
+        color: rgba(234, 242, 255, 0.88);
+        text-shadow: 0 0 60px rgba(255, 255, 255, 0.18);
+      }
+
+      body.screensaver .bouncer {
+        opacity: 1;
+      }
+
+      /* Blue → green → yellow → orange → blue, spread over the whole run. At a
+         minute a loop no single moment of it is a change anybody can catch
+         happening. */
+      @keyframes calm-hues {
+        0%,
+        100% {
+          --base: #04122e;
+          --glow-one: #1e5ad8;
+          --glow-two: #0e7fc4;
+          --glow-three: #3f2fb0;
+        }
+        25% {
+          --base: #04211c;
+          --glow-one: #12806a;
+          --glow-two: #1f9c7a;
+          --glow-three: #14634f;
+        }
+        50% {
+          --base: #1a1605;
+          --glow-one: #c9a227;
+          --glow-two: #d9b64a;
+          --glow-three: #8a6f1e;
+        }
+        75% {
+          --base: #200f04;
+          --glow-one: #c4661f;
+          --glow-two: #d97a2b;
+          --glow-three: #8f4a17;
+        }
+      }
+    </style>
+  </head>
+
+  <body data-idle-ms="{{ .IdleMS }}" data-screensaver-ms="{{ .ScreensaverMS }}">
+    <div class="field" aria-hidden="true">
+      <div class="glow one"></div>
+      <div class="glow two"></div>
+      <div class="glow three"></div>
+    </div>
+
+    <div class="title">
+      <h1 id="heading">{{ .Heading }}</h1>
+      <p class="subheading" id="subheading">{{ .Subheading }}</p>
+    </div>
+
+    <dl class="facts">
+      <div class="fact">
+        <dt>Uptime</dt>
+        <dd id="uptime">{{ .Uptime }}</dd>
+      </div>
+
+      <div class="fact">
+        <dt>Address</dt>
+        <dd id="addresses">
+          {{- if .Addresses -}}
+            {{- range .Addresses }}<span class="line">{{ .IP }}<span class="iface">{{ .Interface }}</span></span>{{ end -}}
+          {{- else -}}
+            no network
+          {{- end -}}
+        </dd>
+      </div>
+
+      <div class="fact">
+        <dt>Load</dt>
+        <dd id="load">{{ .Load }}</dd>
+      </div>
+    </dl>
+
+    <footer>
+      <p class="warning" id="warning">{{ .Warning }}</p>
+      <p class="meta"><span id="time">{{ .Time }}</span> · booted <span id="booted">{{ .BootedAt }}</span></p>
+    </footer>
+
+    <div class="bouncer" id="bouncer" aria-hidden="true">AI4OS</div>
+
+    {{ if .HasQR }}
+      <figure class="qr">
+        <img src="/qr.svg" alt="QR code for {{ .Link }}" />
+        <figcaption>{{ .LinkLabel }}</figcaption>
+      </figure>
+    {{ end }}
+
+    <script>
+      // Poll rather than reload: a full navigation every few seconds churns the
+      // browser and restarts the background animation each time.
+      const REFRESH_MS = 5000;
+
+      const render = (status) => {
+        // The wording comes from the server too, not just the numbers: cage is
+        // configured not to restart on a rebuild, so a rig that changed name
+        // or lost its warning would otherwise keep showing the old page until
+        // somebody rebooted it.
+        document.getElementById("heading").textContent = status.heading;
+        document.getElementById("subheading").textContent = status.subheading;
+        document.getElementById("warning").textContent = status.warning;
+
+        document.getElementById("uptime").textContent = status.uptime;
+        document.getElementById("load").textContent = status.load;
+        document.getElementById("time").textContent = status.time;
+        document.getElementById("booted").textContent = status.booted_at;
+
+        const addresses = document.getElementById("addresses");
+        addresses.replaceChildren();
+
+        if (!status.addresses || status.addresses.length === 0) {
+          addresses.textContent = "no network";
+          return;
+        }
+
+        for (const address of status.addresses) {
+          const line = document.createElement("span");
+          line.className = "line";
+          line.textContent = address.ip;
+
+          const iface = document.createElement("span");
+          iface.className = "iface";
+          iface.textContent = address.interface;
+
+          line.appendChild(iface);
+          addresses.appendChild(line);
+        }
+      };
+
+      const refresh = async () => {
+        try {
+          const response = await fetch("/status.json", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(response.status);
+          }
+
+          render(await response.json());
+          document.body.classList.remove("stale");
+        } catch {
+          document.body.classList.add("stale");
+        }
+      };
+
+      setInterval(refresh, REFRESH_MS);
+
+      // ---- Screensaver ---------------------------------------------------
+      // After IDLE_MS with nobody touching the machine, the readings fade out
+      // and "AI4OS" drifts around the panel for SCREENSAVER_MS, DVD-logo
+      // fashion. Any input ends it immediately and restarts the wait.
+      const IDLE_MS = Number(document.body.dataset.idleMs);
+      const SCREENSAVER_MS = Number(document.body.dataset.screensaverMs);
+
+      // Slow enough that the corners take a while to arrive and nobody watches
+      // for them, which is the opposite of what the original did.
+      const SPEED_PX_S = 34;
+
+      const bouncer = document.getElementById("bouncer");
+
+      let idleTimer = null;
+      let runTimer = null;
+      let frame = null;
+      let previous = 0;
+      let x = 0;
+      let y = 0;
+      let dx = 0;
+      let dy = 0;
+
+      // The travel each axis has before the text would leave the screen. Read
+      // per frame rather than cached: the panel a rig is plugged into can
+      // change size while this is running.
+      const limits = () => [
+        Math.max(window.innerWidth - bouncer.offsetWidth, 0),
+        Math.max(window.innerHeight - bouncer.offsetHeight, 0),
+      ];
+
+      const step = (now) => {
+        const elapsed = previous ? Math.min((now - previous) / 1000, 0.05) : 0;
+        previous = now;
+
+        const [width, height] = limits();
+        x += dx * elapsed;
+        y += dy * elapsed;
+
+        // Reflect off each edge, clamping first so a resize mid-run cannot
+        // strand the text outside the viewport.
+        if (x <= 0) {
+          x = 0;
+          dx = Math.abs(dx);
+        } else if (x >= width) {
+          x = width;
+          dx = -Math.abs(dx);
+        }
+
+        if (y <= 0) {
+          y = 0;
+          dy = Math.abs(dy);
+        } else if (y >= height) {
+          y = height;
+          dy = -Math.abs(dy);
+        }
+
+        bouncer.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        frame = requestAnimationFrame(step);
+      };
+
+      const start = () => {
+        // Matters when "s" starts a run early: the idle timer is still pending
+        // and would otherwise restart everything partway through.
+        clearTimeout(idleTimer);
+
+        const [width, height] = limits();
+        x = width / 2;
+        y = height / 2;
+
+        // A diagonal, but never close to 45° or to an axis: those either
+        // retrace the same path forever or slide along an edge.
+        const angle = ((25 + Math.random() * 40) * Math.PI) / 180;
+        dx = Math.cos(angle) * SPEED_PX_S * (Math.random() < 0.5 ? -1 : 1);
+        dy = Math.sin(angle) * SPEED_PX_S * (Math.random() < 0.5 ? -1 : 1);
+
+        bouncer.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        document.body.classList.add("screensaver");
+
+        previous = 0;
+        frame = requestAnimationFrame(step);
+        runTimer = setTimeout(stop, SCREENSAVER_MS);
+      };
+
+      const stop = () => {
+        clearTimeout(runTimer);
+
+        if (frame !== null) {
+          cancelAnimationFrame(frame);
+          frame = null;
+        }
+
+        // The colours are mid-cycle if this was cut short by somebody at the
+        // keyboard; the transition on body eases them back to blue rather than
+        // cutting to it.
+        document.body.classList.remove("screensaver");
+        wait();
+      };
+
+      const wait = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(start, IDLE_MS);
+      };
+
+      const running = () => document.body.classList.contains("screensaver");
+
+      const interrupted = () => {
+        if (running()) {
+          stop();
+          return;
+        }
+
+        wait();
+      };
+
+      // "s" starts a run there and then, for looking at it without waiting out
+      // the idle period. Once it is running, "s" is just another key and stops
+      // it like anything else would.
+      const typed = (event) => {
+        if (!running() && event.key.toLowerCase() === "s" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          start();
+          return;
+        }
+
+        interrupted();
+      };
+
+      if (SCREENSAVER_MS > 0 && IDLE_MS > 0) {
+        // One run is one pass through the colours, so it ends on the blue it
+        // started from.
+        document.body.style.animationDuration = `${SCREENSAVER_MS}ms`;
+
+        window.addEventListener("keydown", typed, { passive: true });
+
+        for (const event of ["mousemove", "mousedown", "wheel", "touchstart"]) {
+          window.addEventListener(event, interrupted, { passive: true });
+        }
+
+        wait();
+      }
+    </script>
+  </body>
+</html>
