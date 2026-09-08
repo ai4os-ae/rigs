@@ -211,6 +211,15 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* A throttling rig, in the same amber the screensaver reaches at its
+         warmest — warning-coloured without being the red reserved for "do not
+         unplug this". A hot rig is not an emergency; it is doing less work per
+         hour than the queue suggests, which is worth a glance and not an
+         alarm. */
+      .fact dd.hot {
+        color: #ffb347;
+      }
+
       /* A rig on wifi and a dock has more than one address; each gets a line. */
       .fact dd .line {
         display: block;
@@ -433,6 +442,13 @@
         <dd id="load">{{ .Load }}</dd>
       </div>
 
+      {{ if .Temperature }}
+        <div class="fact">
+          <dt>CPU</dt>
+          <dd id="temperature" class="{{ if .Temperature.Throttling }}hot{{ end }}">{{ .Temperature.Text }}</dd>
+        </div>
+      {{ end }}
+
       {{ if .Jobs }}
         <div class="fact">
           <dt>Jobs</dt>
@@ -480,6 +496,16 @@
         const jobs = document.getElementById("jobs");
         if (jobs && status.jobs) {
           jobs.textContent = status.jobs;
+        }
+
+        // Likewise absent where the kernel exposes no package sensor. The
+        // colour is the whole reason this row is worth a glance from across a
+        // room: a warm rig looks like every other reading, a throttling one
+        // does not.
+        const temperature = document.getElementById("temperature");
+        if (temperature && status.temperature) {
+          temperature.textContent = status.temperature.text;
+          temperature.classList.toggle("hot", status.temperature.throttling);
         }
         document.getElementById("time").textContent = status.time;
         document.getElementById("booted").textContent = status.booted_at;

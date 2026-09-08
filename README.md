@@ -40,6 +40,7 @@ modules/
     fleetd.nix     the broker in front of them
 nix/
   kernel-build/    parameterised two-stage Linux kernel builds
+  kernel-test/     booting one of those under QEMU and running tests in it
 pkgs/
   rig-api-docs/    OpenAPI spec + Swagger UI, served as the public root
   rig-buildd/      the job daemon itself (Go, stdlib only)
@@ -285,6 +286,11 @@ curl -sX POST http://laptop-01:9000/v1/jobs -d '{
 }'
 ```
 
+There are two kinds of job. `build` compiles a kernel; `test` boots one under
+QEMU and runs something in it. Both are the same envelope, the same queue and
+the same endpoints, because both are pure functions of their inputs and are
+answered by a derivation. See "Test jobs" below.
+
 Symbol values are `y`, `m` or `n` and nothing else — this is data, not a place
 to smuggle in make commands. Every requested symbol is re-read from the
 resulting `.config` and a build that lost one fails, because a symbol silently
@@ -338,6 +344,120 @@ much again the first time Nix imports a revision into its own git cache. Watch
 `mirror.present` in `/v1/status`, or seed the mirror by hand, before concluding
 that a rig is slow.
 
+## Test jobs
+
+A kernel that compiles is not a kernel that works. `kind: test` boots one in a
+QEMU virtual machine, runs something in it, and tears the machine down.
+
+```
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "test",
+  "kernel": { "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449" },
+  "config": { "base": "defconfig", "set": { "CONFIG_ZRAM": "m" } },
+  "test":   { "modules": ["zram"] }
+}'
+```
+
+A test names its kernel in one of two ways, and both exist because they answer
+different needs:
+
+- **A full spec**, exactly as a build job describes one. Self-contained, means
+  the same thing on any rig, and costs nothing extra when that rig has already
+  built it — the store answers the build stage and the job goes straight to
+  booting.
+- **`"from": "<job-id>"`**, which boots a job you already ran. The short way to
+  say "boot what I just built", and the only way to test a kernel whose spec
+  you no longer have. Through the broker the id is `<rig>.<id>`, and the rig
+  named in it is where the test runs, because that is where the kernel is.
+
+The result is judged the same way a build is. **A kernel that panics is a
+successful job** with `passed: false`; `failed` still means the rig broke.
+
+### What runs inside
+
+With no `test.script`, a test boots the kernel and runs the kernel's own
+selftests on it. With one, it runs that instead — Python 3, as an ordinary
+program, its exit status the test's verdict and everything it printed kept as
+an artifact:
+
+```
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "test",
+  "from": "20260908T091828-0221e5cfee685827",
+  "test": {
+    "modules": ["zram"],
+    "script": "import os\nassert os.path.exists(\"/sys/block/zram0\")\n..."
+  }
+}'
+```
+
+The guest is a plain Linux userspace — busybox, coreutils, bash, python3, and
+the kernel's own modules under `/lib/modules` — with **no network**, because
+the build sandbox has none to give it. It is gone the moment the script
+returns.
+
+A test fails if the kernel does not reach userspace, if a requested module will
+not load, if the script or a selftest fails, if the run exceeds
+`timeout_seconds`, or if the kernel log contains an oops, a `BUG:` or a panic.
+A bare `WARNING:` does not, unless `fail_on_warning` is set — a clean kernel
+warns about something on QEMU's hardware often enough that failing on it would
+only teach people to disregard the verdict.
+
+Alongside the usual log and artifacts, a test job produces `result.json` with
+the verdict and the per-test results, `console.log` — the serial console from
+firmware to power-off, which is where a panic is — and `dmesg.log`,
+`kselftest.log`, `script.log`, `lsmod.log`, `uname.log`.
+
+### About kselftest
+
+`test.kselftest.targets` names collections under `tools/testing/selftests`. The
+default is `exec`, `kcmp` and `size` — deliberately small: these are the ones
+observed to pass, every subtest, on a plain x86_64 `defconfig`. A default that
+goes red on a pristine upstream kernel teaches people to disregard the whole
+thing.
+
+**Most other collections need configuration symbols `defconfig` does not set,
+and kselftest reports a missing symbol as a failure rather than a skip.** So
+naming a target usually means naming the symbols it wants in `config.set` as
+well — `prctl` wants `CONFIG_ANON_VMA_NAME`, `splice` wants `CONFIG_TEST_LKM`,
+`memfd` wants `CONFIG_FUSE_FS`. A target that does not compile at all is
+reported in `result.json` under `kselftest.targets_missing` and fails the test,
+rather than being quietly dropped.
+
+Selftests are built from the **unpatched** source, once per (commit, target
+set), so every candidate patch against a commit shares them — the same trade
+the kernel build makes. A patch that edits `tools/testing/selftests` itself is
+therefore not reflected.
+
+### How a test is put together
+
+Three cached derivations and one that is not:
+
+```
+linux-<commit>-selftests   the kernel's own tests, per (source, targets)
+linux-<commit>-image       bzImage and a depmod'd module tree
+linux-<commit>-guest       an uncompressed initramfs: userspace + the above
+linux-<commit>-test        the QEMU run itself
+```
+
+Only the last is per-test, so a second test against the same kernel starts
+booting immediately. The guest image is **uncompressed** on purpose: a
+compressed initramfs would make the guest's decompressor part of this harness's
+requirements, in a configuration the caller chose and we do not control.
+
+Nothing is shared with the host — no 9p, no virtio-fs, for the same reason.
+Results leave over a second serial port, framed and base64'd, while `ttyS0`
+carries the console. That is what `GET /v1/jobs/{id}/log?follow=1` streams, so
+you can watch a kernel boot as it happens.
+
+Test jobs need `/dev/kvm`: the derivation asks for the `kvm` system feature, so
+a rig without it refuses to schedule the job rather than silently emulating
+every instruction and turning a ten second boot into several minutes.
+
+Unlike builds, a test's output is **not** byte-reproducible — it contains
+`dmesg` timestamps and real timings. The reproducibility guarantee below is
+about build artifacts.
+
 ### State
 
 Everything is under `/var/lib/rig/buildd/jobs/<id>/` as plain files — no
@@ -348,6 +468,7 @@ job.json         the job and its state
 job.nix          the generated expression; `nix build -f` it to reproduce by hand
 log              the build log
 candidate.patch  the patch, if there was one
+test.py          the test script, if there was one
 result           symlink into the store — and the GC root
 ```
 

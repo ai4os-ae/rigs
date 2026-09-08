@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,22 @@ type MemberStatus struct {
 // but not finished. Load average is not used — it lags by a minute, which is
 // most of a patched build.
 func (m *MemberStatus) pending() int { return m.QueueDepth + m.Running }
+
+// runs reports whether this rig implements a kind of job.
+//
+// A rig that has not said — an older one, or one whose status did not parse —
+// is taken to run builds and nothing else, which is what every rig has always
+// done. Assuming the opposite would empty the fleet the first time a status
+// field changed shape.
+func (m *MemberStatus) runs(kind string) bool {
+	if kind == "" {
+		return true
+	}
+	if len(m.Kinds) == 0 {
+		return kind == "build"
+	}
+	return slices.Contains(m.Kinds, kind)
+}
 
 type Fleet struct {
 	members []Member
@@ -172,13 +189,13 @@ func (f *Fleet) Lookup(name string) (Member, bool) {
 //
 //  1. An explicit pin wins, and fails loudly if that rig is down — somebody who
 //     named a rig wants that rig, not a silent substitution.
-//  2. Otherwise, among live rigs of the right system: the one that most
-//     recently built this same (commit, configuration). That rig already has
-//     the expensive unpatched base in its store, which is the difference
-//     between a twenty-second job and a six-minute one, and is by far the
-//     largest lever available here.
+//  2. Otherwise, among live rigs that run this kind and this system: the one
+//     that most recently built this same (commit, configuration). That rig
+//     already has the expensive unpatched base in its store, which is the
+//     difference between a twenty-second job and a six-minute one, and is by
+//     far the largest lever available here.
 //  3. Otherwise the least busy, and free disk to break ties.
-func (f *Fleet) Pick(system, pin, affinityKey string) (Member, error) {
+func (f *Fleet) Pick(system, pin, kind, affinityKey string) (Member, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -193,6 +210,9 @@ func (f *Fleet) Pick(system, pin, affinityKey string) (Member, error) {
 		if system != "" && s.System != "" && s.System != system {
 			return Member{}, fmt.Errorf("rig %q is %s, not %s", pin, s.System, system)
 		}
+		if !s.runs(kind) {
+			return Member{}, fmt.Errorf("rig %q does not run %s jobs", pin, kind)
+		}
 		return s.Member, nil
 	}
 
@@ -204,10 +224,13 @@ func (f *Fleet) Pick(system, pin, affinityKey string) (Member, error) {
 		if system != "" && s.System != "" && s.System != system {
 			continue
 		}
+		if !s.runs(kind) {
+			continue
+		}
 		candidates = append(candidates, s)
 	}
 	if len(candidates) == 0 {
-		return Member{}, fmt.Errorf("no reachable rig runs %s", system)
+		return Member{}, fmt.Errorf("no reachable rig runs %s jobs on %s", kind, system)
 	}
 
 	if preferred := f.affinity.Get(affinityKey); preferred != "" {

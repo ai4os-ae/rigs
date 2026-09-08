@@ -2,20 +2,36 @@ openapi: 3.1.0
 
 info:
   title: AI4OS rigs
-  version: "1.0.0"
-  summary: Build Linux kernels on the AI4OS research rigs.
+  version: "1.1.0"
+  summary: Build and boot-test Linux kernels on the AI4OS research rigs.
   description: |
     Submit a kernel commit, an optional patch and a configuration; a rig builds
     it and hands back the artifacts, the logs and a report.
+
+    ### Two kinds of job
+
+    `kind: build` compiles a kernel. `kind: test` boots one in a QEMU virtual
+    machine, runs something in it, and tears it down.
+
+    A test either describes the kernel it wants, exactly as a build job does —
+    in which case the build comes out of the store if that rig has already done
+    it — or names an earlier job with `from`, which is the short way to say
+    "boot what I just built".
+
+    What runs inside is either the kernel's own selftests, which is what a test
+    with no script of its own does, or a Python program you supply. Either way
+    the guest has no network, gets torn down when the script finishes, and
+    cannot outlive `test.timeout_seconds`.
 
     ### `state` and `passed` answer different questions
 
     This is the one thing worth reading before writing a client.
 
-    `state` is what happened to the *job*. `passed` is whether the *kernel
-    compiled*. A patch that does not build is a perfectly good answer to the
-    question that was asked, so it comes back as `state: succeeded` with
-    `passed: false` and the compiler error in the log.
+    `state` is what happened to the *job*. `passed` is whether the *kernel did
+    what was asked* — compiled, for a build; booted and passed its tests, for a
+    test. A patch that does not build, or a kernel that panics on boot, is a
+    perfectly good answer to the question that was asked, so it comes back as
+    `state: succeeded` with `passed: false` and the evidence in the log.
 
     `state: failed` means the daemon or the build system itself broke, and you
     have learned nothing about your patch.
@@ -111,6 +127,43 @@ paths:
                     commit: e5f0a698b34ed76002dc5cff3804a61c80233a7a
                   config:
                     base: defconfig
+              boot-test:
+                summary: Boot a patched kernel and run the kernel's own tests
+                value:
+                  kind: test
+                  kernel:
+                    commit: e5f0a698b34ed76002dc5cff3804a61c80233a7a
+                  config:
+                    base: defconfig
+                    set:
+                      CONFIG_ZRAM: m
+                  patch: |
+                    --- a/drivers/block/zram/zram_drv.c
+                    +++ b/drivers/block/zram/zram_drv.c
+                  test:
+                    modules: [zram]
+              scripted-test:
+                summary: Boot a kernel you already built and run your own test
+                value:
+                  kind: test
+                  from: laptop-01.20260908T091828-0221e5cfee685827
+                  test:
+                    modules: [zram]
+                    timeout_seconds: 300
+                    script: |
+                      import os
+
+                      assert os.path.exists("/sys/block/zram0"), "zram0 did not appear"
+
+                      with open("/sys/block/zram0/disksize", "w") as f:
+                          f.write(str(64 << 20))
+                      with open("/dev/zram0", "wb") as dev:
+                          dev.write(b"hello from a rig" * 4096)
+
+                      with open("/sys/block/zram0/mm_stat") as f:
+                          orig, compressed = f.read().split()[:2]
+                      print(f"{orig} bytes compressed to {compressed}")
+                      assert int(compressed) < int(orig), "zram compressed nothing"
       responses:
         "202":
           description: Accepted and queued on a rig.
@@ -263,9 +316,14 @@ paths:
         in: path
         required: true
         description: |
-          Path as it appears in the manifest, for example `bzImage`, `vmlinux`,
-          `config`, `report.json`, or
-          `modules/lib/modules/6.17.0/kernel/drivers/block/zram/zram.ko`.
+          Path as it appears in the manifest.
+
+          A build job produces `bzImage`, `vmlinux`, `config`, `report.json`
+          and `modules/lib/modules/6.17.0/kernel/drivers/block/zram/zram.ko`.
+
+          A test job produces `result.json`, `console.log` — the serial console
+          from firmware to power-off, which is where a panic is — `dmesg.log`,
+          `kselftest.log`, `script.log`, `lsmod.log` and `uname.log`.
         schema: { type: string }
     get:
       tags: [jobs]
@@ -396,15 +454,30 @@ components:
 
     JobRequest:
       type: object
-      required: [kernel]
       properties:
         kind:
           type: string
           default: build
-          enum: [build]
+          enum: [build, test]
           description: |
-            Boot tests and fuzz runs will appear here. Read `kinds` from
+            `build` compiles a kernel; `test` boots one under QEMU and runs
+            something in it. Fuzz runs will appear here. Read `kinds` from
             `/v1/rigs` rather than assuming a rig supports one.
+        from:
+          type: string
+          description: |
+            Test jobs only. The id of a finished build job whose kernel to
+            boot, exactly as it was returned — `<rig>.<id>`. The rig named in
+            it is where the test runs, because that is where the kernel is; a
+            `rig` that disagrees with it fails with `409`.
+
+            Mutually exclusive with `kernel`, `config` and `patch`: a job
+            either names a kernel or describes one. Describing one costs
+            nothing extra when that rig has already built it, so prefer it when
+            you have the spec — a job that carries its own spec means the same
+            thing on any rig and after the build it came from is deleted.
+        test:
+          $ref: "#/components/schemas/TestRequest"
         kernel:
           type: object
           required: [commit]
@@ -462,6 +535,141 @@ components:
             reports. Derived from `arch` when omitted.
           examples: [x86_64-linux]
 
+    TestRequest:
+      type: object
+      description: |
+        What to do once the kernel has booted. Omit it entirely and the job
+        boots the kernel and runs the kernel's own selftests on it, which is
+        the useful default for "does this kernel work".
+      properties:
+        script:
+          type: string
+          description: |
+            Python 3, run inside the guest as an ordinary program. Its exit
+            status is the test's: zero passed, anything else did not, and
+            everything it printed is kept as the `script.log` artifact.
+
+            The guest is a plain Linux userspace with busybox, bash and
+            python3, the kernel's modules under `/lib/modules`, and **no
+            network** — the build sandbox has none to give it. It is torn down
+            as soon as the script returns.
+
+            Supplying a script turns kselftest off unless you ask for it back:
+            you asked a specific question, and several minutes of unrelated
+            tests would slow the answer down and blur what a failure means.
+        modules:
+          type: array
+          items: { type: string }
+          description: |
+            Modules to load before anything else runs, so a script or a
+            selftest can assume the driver under test is present. A module that
+            will not load fails the test.
+        kselftest:
+          type: object
+          properties:
+            enable:
+              type: boolean
+              description: |
+                Defaults to true when there is no `script` and false when there
+                is. Set it explicitly to have both.
+            targets:
+              type: array
+              items: { type: string }
+              description: |
+                Selftest collections to build and run, as named under
+                `tools/testing/selftests`. Empty is the rig's default set,
+                chosen because it builds and passes on a plain `defconfig`.
+
+                Most other collections need configuration symbols `defconfig`
+                does not set, and kselftest reports a missing symbol as a
+                failure rather than a skip — so name a target and you may also
+                need to name the symbols it wants in `config.set`. A target
+                that does not compile is reported in `result.json` under
+                `kselftest.targets_missing` and fails the test rather than
+                being quietly dropped.
+        timeout_seconds:
+          type: integer
+          default: 900
+          maximum: 7200
+          description: |
+            How long the whole run may take, boot included. A kernel that hangs
+            is a result, and this is how long the rig waits for it.
+        memory_mb:
+          type: integer
+          default: 4096
+          maximum: 32768
+          minimum: 512
+        cpus:
+          type: integer
+          default: 2
+          maximum: 64
+        fail_on_warning:
+          type: boolean
+          default: false
+          description: |
+            Whether a `WARNING:` splat in the kernel log fails the test. Off by
+            default, because a clean kernel warns about something on QEMU's
+            hardware often enough that failing on it teaches people to
+            disregard the verdict. An oops, a `BUG:` or a panic always fails
+            and is not configurable.
+
+    TestResult:
+      type: object
+      description: |
+        `result.json`, fetched like any other artifact. The verdict it carries
+        is the same one in the job's `passed`.
+      properties:
+        passed: { type: boolean }
+        booted:
+          type: boolean
+          description: |
+            Whether the kernel reached userspace at all. False here with
+            `console.log` full of a panic is the most common interesting
+            failure.
+        reasons:
+          type: array
+          items: { type: string }
+          description: Why it did not pass. Empty when it did.
+        guest_status:
+          type: [integer, "null"]
+          description: |
+            The status the guest itself reported, or null if it never finished
+            — it panicked, or the timeout expired.
+        tainted:
+          type: [integer, "null"]
+          description: |
+            `/proc/sys/kernel/tainted` after the run. Non-zero means the kernel
+            did something it is not supposed to have done, whatever the tests
+            said.
+        kernel_splats:
+          type: array
+          description: Oops, BUG and panic lines found in the kernel log.
+          items:
+            type: object
+            properties:
+              pattern: { type: string }
+              line: { type: string }
+        kselftest:
+          type: [object, "null"]
+          properties:
+            total: { type: integer }
+            passed: { type: integer }
+            failed: { type: integer }
+            skipped: { type: integer }
+            targets_requested: { type: array, items: { type: string } }
+            targets_built: { type: array, items: { type: string } }
+            targets_missing:
+              type: array
+              items: { type: string }
+              description: Targets that were asked for and did not compile.
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  status: { type: string, enum: [passed, failed, skipped] }
+
     Job:
       type: object
       properties:
@@ -478,8 +686,13 @@ components:
         passed:
           type: [boolean, "null"]
           description: |
-            Whether the kernel compiled and its configuration verified. Null
-            until the job finishes. **This is the field that judges a patch.**
+            **This is the field that judges a patch.** Null until the job
+            finishes.
+
+            For a build: whether the kernel compiled and its configuration
+            verified. For a test: whether it booted, ran everything asked of
+            it without a failure, and produced no oops or panic. `result.json`
+            says which of those it was.
         error:
           type: string
           description: "Set when `state` is `failed`: why the rig could not answer."

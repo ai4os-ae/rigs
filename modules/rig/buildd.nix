@@ -22,6 +22,9 @@ let
   rig = config.rigs.rig;
 
   user = "rig-buildd";
+
+  # The whole directory, copied once. See the comment on -kernel-build below.
+  nixDir = ../../nix;
 in
 {
   options.rigs.buildd = {
@@ -122,6 +125,27 @@ in
       "d ${cfg.buildDir} 0755 root root -"
     ];
 
+    # A test job boots the kernel it is testing inside QEMU, and the
+    # derivation that does it asks for the `kvm` feature. Without the feature
+    # advertised the job is not scheduled at all — which is the right failure,
+    # and a clear one — and without /dev/kvm behind it QEMU would emulate every
+    # instruction and turn a ten second boot into several minutes.
+    #
+    # NixOS advertises kvm by default on a machine that has it. Asserted rather
+    # than assumed because the failure otherwise arrives at the first test job
+    # somebody submits, on a rig nobody is standing in front of.
+    assertions = [
+      {
+        assertion = lib.elem "kvm" config.nix.settings.system-features;
+        message = ''
+          rigs.buildd needs the "kvm" system feature: test jobs boot a kernel
+          under QEMU. Either this rig has no /dev/kvm, in which case it cannot
+          run test jobs, or nix.settings.system-features has been overridden
+          without it.
+        '';
+      }
+    ];
+
     nix.settings = {
       build-dir = cfg.buildDir;
 
@@ -183,14 +207,22 @@ in
             # channel happens to be registered on the machine.
             #
             # Interpolated, not `toString`: interpolation records a store
-            # reference, so both paths are copied to the rig as dependencies of
+            # reference, so the paths are copied to the rig as dependencies of
             # this unit. `toString` yields the same text with no reference, and
             # the daemon then starts happily and fails at the first job with a
             # store path that was never copied.
+            #
+            # One copy of nix/ rather than one per directory, because
+            # kernel-test reads kernel-build's report.py by a relative path —
+            # the two agree on report.json's schema, and sharing the file is
+            # how they go on agreeing. Copied separately, that `..` would climb
+            # out of the store path and find nothing.
             "-nixpkgs"
             "${pkgs.path}"
             "-kernel-build"
-            "${../../nix/kernel-build}"
+            "${nixDir}/kernel-build"
+            "-kernel-test"
+            "${nixDir}/kernel-test"
           ]
           ++ lib.optionals (cfg.tokenFile != null) [
             "-token-file"

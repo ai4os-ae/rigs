@@ -38,14 +38,15 @@ func main() {
 	remote := flag.String("remote", "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git", "where to fetch kernel commits from")
 	nixpkgs := flag.String("nixpkgs", "", "store path of the nixpkgs the builds evaluate against (required)")
 	kernelBuild := flag.String("kernel-build", "", "store path of the kernel-build expression (required)")
+	kernelTest := flag.String("kernel-test", "", "store path of the kernel-test expression (required)")
 	capacity := flag.Int("max-concurrent", 1, "builds to run at once; a kernel build wants the whole machine")
 	tokenFile := flag.String("token-file", "", "file holding a bearer token; empty means rely on the mesh alone")
 	flag.Parse()
 
 	log.SetFlags(0) // The journal already stamps every line.
 
-	if *nixpkgs == "" || *kernelBuild == "" {
-		log.Fatal("-nixpkgs and -kernel-build are required; they pin what the builds evaluate against")
+	if *nixpkgs == "" || *kernelBuild == "" || *kernelTest == "" {
+		log.Fatal("-nixpkgs, -kernel-build and -kernel-test are required; they pin what jobs evaluate against")
 	}
 	if *mirrorPath == "" {
 		*mirrorPath = filepath.Join(*state, "linux.git")
@@ -65,7 +66,7 @@ func main() {
 		log.Fatalf("opening the job store: %v", err)
 	}
 	mirror := NewMirror(*mirrorPath, *remote)
-	runner := NewRunner(store, mirror, *nixpkgs, *kernelBuild, *capacity)
+	runner := NewRunner(store, mirror, *nixpkgs, *kernelBuild, *kernelTest, *capacity)
 	runner.Start()
 
 	// A rig reboots for its nightly upgrade, and a build that was running is
@@ -175,6 +176,20 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 	if err := spec.validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Resolved now rather than when the job reaches the front of the queue.
+	// Naming a job that does not exist, or one whose kernel never compiled, is
+	// a mistake a caller can fix, and telling them half an hour later — after
+	// the job has queued behind somebody's kernel build — helps nobody.
+	//
+	// It is checked again when the job runs, because the referenced job can be
+	// deleted in between.
+	if spec.From != "" {
+		if _, err := resolveFrom(s.store, spec.From); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 	}
 
 	job, err := s.store.Create(spec)

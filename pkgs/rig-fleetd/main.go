@@ -193,6 +193,16 @@ type submitRequest struct {
 	// arch, and failing that the fleet's default.
 	System string `json:"system,omitempty"`
 
+	// build or test. Empty is a build, which is what every job was before
+	// tests existed.
+	Kind string `json:"kind,omitempty"`
+
+	// A test job that boots an earlier job's kernel, as "<rig>.<id>". This is
+	// the one field the broker has to rewrite rather than pass through: a rig
+	// knows nothing about fleet ids, and the rig half of it is also what
+	// decides where the test has to run.
+	From string `json:"from,omitempty"`
+
 	Kernel struct {
 		Commit string `json:"commit"`
 	} `json:"kernel"`
@@ -225,13 +235,47 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 		system = arch + "-linux"
 	}
 
+	kind := req.Kind
+	if kind == "" {
+		kind = "build"
+	}
+
+	pin := req.Rig
+
+	// A test that boots an earlier job's kernel can only run where that kernel
+	// is. There is no placement decision left to make, so the reference is the
+	// pin — and if the caller also named a rig, the two have to agree, because
+	// silently honouring one of them would run the test somewhere it cannot
+	// possibly work.
+	if req.From != "" {
+		rig, id, ok := strings.Cut(req.From, ".")
+		if !ok {
+			writeError(w, http.StatusBadRequest, "from should be <rig>.<id>, as returned when the job was submitted")
+			return
+		}
+		if pin != "" && pin != rig {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("job %s is on rig %s, but this asks for rig %s", req.From, rig, pin))
+			return
+		}
+		pin = rig
+
+		// Rewritten to the rig's own id: the rig has never heard of the fleet
+		// prefix and would reject it as not being one of its job ids.
+		body, err = rewriteFrom(body, id)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	base := req.Config.Base
 	if base == "" {
 		base = "defconfig"
 	}
 	key := affinityKey(req.Kernel.Commit, base, req.Arch, req.Config.Set)
 
-	member, err := s.fleet.Pick(system, req.Rig, key)
+	member, err := s.fleet.Pick(system, pin, kind, key)
 	if err != nil {
 		// The fleet is reachable but cannot take this job: that is a
 		// conflict, not a malformed request.
@@ -239,8 +283,8 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forwarded as received. rig-buildd ignores the fields it does not know,
-	// so `rig` and `system` need no stripping.
+	// Forwarded as received, apart from `from`. rig-buildd ignores the fields
+	// it does not know, so `rig` and `system` need no stripping.
 	upstream, err := s.post(r.Context(), member, body)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("rig %s: %v", member.Name, err))
@@ -257,6 +301,22 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/v1/jobs/"+fmt.Sprint(upstream["id"]))
 	writeJSON(w, http.StatusAccepted, upstream)
+}
+
+// rewriteFrom replaces the job envelope's `from` with the rig-local id.
+//
+// Decoded and re-encoded as a generic map rather than string-substituted, so
+// that a `from` value appearing inside a test script — which is an arbitrary
+// string in the same JSON document — cannot be rewritten by accident. Every
+// other field survives untouched, which is what lets a field added to
+// rig-buildd need no change here.
+func rewriteFrom(body []byte, id string) ([]byte, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("malformed job: %w", err)
+	}
+	envelope["from"] = id
+	return json.Marshal(envelope)
 }
 
 func (s *server) post(ctx context.Context, member Member, body []byte) (map[string]any, error) {

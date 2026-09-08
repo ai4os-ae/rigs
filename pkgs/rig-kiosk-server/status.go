@@ -50,6 +50,11 @@ type Status struct {
 	// runs no build daemon, in which case the page leaves the row out
 	// altogether rather than showing a permanently blank fact.
 	Jobs string `json:"jobs"`
+
+	// How hot the CPU is, and whether it is throttling. Null on a machine
+	// whose kernel exposes no package sensor — a virtual machine, mostly — and
+	// the row is left out in that case for the same reason as jobs.
+	Temperature *Temperature `json:"temperature"`
 }
 
 // Address is one usable address on one interface. Loopback and link-local are
@@ -63,9 +68,12 @@ type Address struct {
 func (a Address) String() string { return a.Interface + "  " + a.IP }
 
 // collect gathers the current state. Everything is read fresh on each request
-// — the page polls, and these are cheap reads of /proc and a netlink dump,
-// plus one request to the build daemon on loopback.
-func collect(now time.Time, text Text, buildd string) Status {
+// — the page polls, and these are cheap reads of /proc and /sys and a netlink
+// dump, plus one request to the build daemon on loopback.
+//
+// `sensors` is the one argument that is not a setting: throttling is a
+// difference between two reads, so something has to remember the last one.
+func collect(now time.Time, text Text, buildd string, sensors *thermal) Status {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
@@ -77,13 +85,14 @@ func collect(now time.Time, text Text, buildd string) Status {
 	text.LinkLabel = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(text.Link, "https://"), "http://"), "/")
 
 	s := Status{
-		Text:      text,
-		Hostname:  hostname,
-		Load:      loadAverage(),
-		Addresses: addresses(),
-		Time:      now.Format("Mon 2 Jan 15:04"),
-		Uptime:    "unknown",
-		Jobs:      buildJobs(buildd),
+		Text:        text,
+		Hostname:    hostname,
+		Load:        loadAverage(),
+		Addresses:   addresses(),
+		Time:        now.Format("Mon 2 Jan 15:04"),
+		Uptime:      "unknown",
+		Jobs:        buildJobs(buildd),
+		Temperature: sensors.read(now),
 	}
 
 	if up, err := uptime(); err == nil {

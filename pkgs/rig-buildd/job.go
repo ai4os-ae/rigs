@@ -13,15 +13,18 @@ import (
 	"time"
 )
 
-// Kind tags what a job asks for. Only builds are implemented; the field exists
-// because boot tests and fuzz runs are coming and they are not the same shape
-// of work. A build and a boot test are pure functions of their inputs and are
-// answered by a derivation; a fuzz run is a long-lived process with a corpus
-// that has to survive it. Tagging the envelope now means adding the second
-// backend later does not change this API.
+// Kind tags what a job asks for. A build compiles a kernel; a test boots one
+// in a virtual machine and runs something in it. Both are pure functions of
+// their inputs and are answered by a derivation, which is why they share this
+// envelope, this queue and this state machine. A fuzz run would not — it is a
+// long-lived process with a corpus that has to survive it — and that is the
+// reason this is a tagged envelope rather than an assumption.
 type Kind string
 
-const KindBuild Kind = "build"
+const (
+	KindBuild Kind = "build"
+	KindTest  Kind = "test"
+)
 
 // State is what happened to the job, which is not the same question as whether
 // the kernel compiled.
@@ -59,6 +62,50 @@ type ConfigSpec struct {
 	Set map[string]string `json:"set,omitempty"`
 }
 
+// KselftestSpec selects the kernel's own tests. Absent means the default set
+// for a test with no script of its own, and nothing for a test that has one:
+// somebody who wrote a script asked a specific question, and answering a
+// different one alongside it doubles the runtime and muddies the verdict.
+type KselftestSpec struct {
+	// nil is "decide from whether there is a script"; false and true are the
+	// caller overriding that.
+	Enable *bool `json:"enable,omitempty"`
+	// Which selftest collections to build and run. Empty is the rig's default
+	// set. A target that does not compile is reported, not fatal.
+	Targets []string `json:"targets,omitempty"`
+}
+
+// TestSpec is what to do once the kernel has booted.
+type TestSpec struct {
+	// Python 3, run inside the guest as an ordinary program. Its exit status
+	// is the test's: zero passed, anything else did not. Empty runs no script,
+	// which is the boot-and-kselftest case.
+	Script string `json:"script,omitempty"`
+
+	// Modules to load before anything else runs, so that a script or a
+	// selftest can assume the driver under test is present. A module that will
+	// not load fails the test.
+	Modules []string `json:"modules,omitempty"`
+
+	Kselftest *KselftestSpec `json:"kselftest,omitempty"`
+
+	// How long the whole run may take, including boot. A kernel that hangs is
+	// a result and this is how long the rig waits for it.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+
+	// The virtual machine's size. Defaults are generous rather than minimal:
+	// the guest image is uncompressed and lands in a tmpfs, so a small -m is a
+	// confusing out-of-memory during boot rather than a saving.
+	MemoryMB int `json:"memory_mb,omitempty"`
+	CPUs     int `json:"cpus,omitempty"`
+
+	// Whether a WARNING splat in the kernel log fails the test. Off by
+	// default: a clean kernel warns about something on QEMU's hardware often
+	// enough that failing on it teaches people to disregard the verdict. An
+	// oops, a BUG or a panic always fails, and is not configurable.
+	FailOnWarning bool `json:"fail_on_warning,omitempty"`
+}
+
 type Spec struct {
 	Kind   Kind       `json:"kind"`
 	Kernel KernelSpec `json:"kernel"`
@@ -67,6 +114,18 @@ type Spec struct {
 	Patch  string     `json:"patch,omitempty"`
 	Config ConfigSpec `json:"config"`
 	Arch   string     `json:"arch"`
+
+	// A test job only. The id of a finished job on this rig whose kernel to
+	// boot, instead of describing one to build.
+	//
+	// Both spellings exist because they answer different needs. A spec is
+	// self-contained and means the same thing on any rig, and costs nothing to
+	// repeat because the store already has the build. `from` is for the
+	// obvious thing a person actually wants to say — boot what I just built —
+	// and is the only way to test a kernel whose spec you no longer have.
+	From string `json:"from,omitempty"`
+
+	Test *TestSpec `json:"test,omitempty"`
 }
 
 type Job struct {
@@ -95,6 +154,29 @@ var (
 	// passed to make, and a caller should not be able to smuggle a second
 	// target or a shell fragment through it.
 	configBaseRE = regexp.MustCompile(`^[a-z0-9_]+$`)
+	// A job id as Store.Create mints them: a timestamp and eight random bytes.
+	// Checked rather than merely looked up, because it is used to build a path.
+	jobIDRE = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}-[0-9a-f]{16}$`)
+	// Module names, as modprobe accepts them.
+	moduleRE = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// A selftest collection, which is a directory under
+	// tools/testing/selftests and may be nested, as in net/mptcp.
+	targetRE = regexp.MustCompile(`^[a-z0-9_][a-z0-9_/-]*$`)
+)
+
+// Bounds on a test, so that one job cannot take a rig out of service for a
+// day. Generous rather than tight: the point is that a runaway ends, not that
+// a caller has to justify wanting four gigabytes.
+const (
+	defaultTestTimeout = 900
+	maxTestTimeout     = 7200
+	defaultTestMemory  = 4096
+	maxTestMemory      = 32768
+	defaultTestCPUs    = 2
+	maxTestCPUs        = 64
+	// A test script is a test script. Anything larger is data that wants to be
+	// fetched, and the guest has no network to fetch it with.
+	maxScriptBytes = 1 << 20
 )
 
 // validate rejects a spec before it can reach the queue. Everything here is
@@ -104,12 +186,48 @@ func (s *Spec) validate() error {
 	if s.Kind == "" {
 		s.Kind = KindBuild
 	}
-	if s.Kind != KindBuild {
-		return fmt.Errorf("unsupported kind %q; this rig implements %q", s.Kind, KindBuild)
+	if s.Kind != KindBuild && s.Kind != KindTest {
+		return fmt.Errorf("unsupported kind %q; this rig implements %q and %q", s.Kind, KindBuild, KindTest)
 	}
 
-	if !commitRE.MatchString(s.Kernel.Commit) {
-		return fmt.Errorf("kernel.commit must be a full 40-character hex commit, got %q", s.Kernel.Commit)
+	if s.Kind == KindBuild {
+		if s.From != "" {
+			return fmt.Errorf("from is for test jobs; a build job describes the kernel it builds")
+		}
+		if s.Test != nil {
+			return fmt.Errorf("test is for test jobs; set kind to %q", KindTest)
+		}
+	}
+
+	// A test either names the kernel it wants or describes one, and doing both
+	// is a caller who believes one of them is being honoured when it is not.
+	if s.From != "" {
+		if !jobIDRE.MatchString(s.From) {
+			return fmt.Errorf("from must be the id of a job on this rig, got %q", s.From)
+		}
+		if s.Kernel.Commit != "" || s.Patch != "" || s.Config.Base != "" || len(s.Config.Set) > 0 {
+			return fmt.Errorf("a job with `from` boots that job's kernel; do not also describe one to build")
+		}
+	} else {
+		if !commitRE.MatchString(s.Kernel.Commit) {
+			return fmt.Errorf("kernel.commit must be a full 40-character hex commit, got %q", s.Kernel.Commit)
+		}
+
+		if s.Config.Base == "" {
+			s.Config.Base = "defconfig"
+		}
+		if !configBaseRE.MatchString(s.Config.Base) {
+			return fmt.Errorf("config.base must be a kernel make target such as defconfig, got %q", s.Config.Base)
+		}
+
+		for symbol, value := range s.Config.Set {
+			if !symbolRE.MatchString(symbol) {
+				return fmt.Errorf("config symbol %q is not a Kconfig symbol name", symbol)
+			}
+			if value != "y" && value != "m" && value != "n" {
+				return fmt.Errorf("config.set[%s] must be y, m or n, got %q", symbol, value)
+			}
+		}
 	}
 
 	if s.Arch == "" {
@@ -119,23 +237,89 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only x86_64 is implemented, got %q", s.Arch)
 	}
 
-	if s.Config.Base == "" {
-		s.Config.Base = "defconfig"
-	}
-	if !configBaseRE.MatchString(s.Config.Base) {
-		return fmt.Errorf("config.base must be a kernel make target such as defconfig, got %q", s.Config.Base)
-	}
-
-	for symbol, value := range s.Config.Set {
-		if !symbolRE.MatchString(symbol) {
-			return fmt.Errorf("config symbol %q is not a Kconfig symbol name", symbol)
+	if s.Kind == KindTest {
+		if s.Test == nil {
+			// A test with no instructions is the useful default rather than an
+			// error: boot the kernel and run the kernel's own tests on it.
+			s.Test = &TestSpec{}
 		}
-		if value != "y" && value != "m" && value != "n" {
-			return fmt.Errorf("config.set[%s] must be y, m or n, got %q", symbol, value)
+		if err := s.Test.validate(); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func (t *TestSpec) validate() error {
+	if len(t.Script) > maxScriptBytes {
+		return fmt.Errorf("test.script is %d bytes; the limit is %d", len(t.Script), maxScriptBytes)
+	}
+
+	for _, module := range t.Modules {
+		if !moduleRE.MatchString(module) {
+			return fmt.Errorf("test.modules[%q] is not a module name", module)
+		}
+	}
+
+	if t.Kselftest != nil {
+		for _, target := range t.Kselftest.Targets {
+			if !targetRE.MatchString(target) {
+				return fmt.Errorf("test.kselftest.targets[%q] is not a selftest collection", target)
+			}
+		}
+	}
+
+	if t.TimeoutSeconds == 0 {
+		t.TimeoutSeconds = defaultTestTimeout
+	}
+	if t.TimeoutSeconds < 1 || t.TimeoutSeconds > maxTestTimeout {
+		return fmt.Errorf("test.timeout_seconds must be between 1 and %d, got %d", maxTestTimeout, t.TimeoutSeconds)
+	}
+
+	if t.MemoryMB == 0 {
+		t.MemoryMB = defaultTestMemory
+	}
+	// Not merely a lower bound for tidiness: the guest image is an
+	// uncompressed initramfs unpacked into a tmpfs, so a machine too small to
+	// hold it fails during boot with an out-of-memory that looks like a kernel
+	// problem rather than a job that asked for too little.
+	if t.MemoryMB < 512 || t.MemoryMB > maxTestMemory {
+		return fmt.Errorf("test.memory_mb must be between 512 and %d, got %d", maxTestMemory, t.MemoryMB)
+	}
+
+	if t.CPUs == 0 {
+		t.CPUs = defaultTestCPUs
+	}
+	if t.CPUs < 1 || t.CPUs > maxTestCPUs {
+		return fmt.Errorf("test.cpus must be between 1 and %d, got %d", maxTestCPUs, t.CPUs)
+	}
+
+	return nil
+}
+
+// KselftestEnabled decides whether to run the kernel's own tests.
+//
+// The default depends on whether the caller wrote a script, which is the one
+// piece of policy in this file: a test with no script of its own is asking
+// "does this kernel work", and kselftest is the best available answer. A test
+// with a script asked something specific, and running several minutes of
+// unrelated tests alongside it would slow the answer down and blur what a
+// failure means.
+func (t *TestSpec) KselftestEnabled() bool {
+	if t.Kselftest != nil && t.Kselftest.Enable != nil {
+		return *t.Kselftest.Enable
+	}
+	return t.Script == ""
+}
+
+// KselftestTargets is the collections to build, or nil for the rig's default
+// set, which nix/kernel-test chooses rather than this.
+func (t *TestSpec) KselftestTargets() []string {
+	if t.Kselftest == nil {
+		return nil
+	}
+	return t.Kselftest.Targets
 }
 
 // Store keeps jobs on disk, one directory each, and an index of them in

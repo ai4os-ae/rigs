@@ -20,8 +20,8 @@ type Status struct {
 	// same architecture, which stops being true the moment an arm board joins.
 	System string `json:"system"`
 
-	// What this rig can be asked for. Boot tests and fuzz runs will appear
-	// here when their backends do; a client should look rather than assume.
+	// What this rig can be asked for. Fuzz runs will appear here when their
+	// backend does; a client should look rather than assume.
 	Kinds []string `json:"kinds"`
 
 	QueueDepth int      `json:"queue_depth"`
@@ -42,7 +42,7 @@ func collectStatus(runner *Runner, mirror *Mirror) Status {
 		Hostname:       hostname,
 		System:         nixSystem(),
 		Time:           time.Now().UTC(),
-		Kinds:          []string{string(KindBuild)},
+		Kinds:          []string{string(KindBuild), string(KindTest)},
 		QueueDepth:     runner.QueueDepth(),
 		Running:        runner.Running(),
 		Capacity:       runner.capacity,

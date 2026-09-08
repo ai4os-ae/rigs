@@ -66,6 +66,11 @@ func main() {
 		text.HasQR = true
 	}
 
+	// One reader for the life of the process: it remembers the last throttle
+	// counter it saw, which is the only way to tell "this rig is throttling
+	// now" from "this rig was too hot once, three weeks ago".
+	sensors := &thermal{}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +79,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		if err := page.Execute(w, collect(time.Now(), text, *buildd)); err != nil {
+		if err := page.Execute(w, collect(time.Now(), text, *buildd, sensors)); err != nil {
 			// Too late for an error status: the template writes as it renders.
 			log.Printf("rendering page: %v", err)
 		}
@@ -84,7 +89,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 
-		if err := json.NewEncoder(w).Encode(collect(time.Now(), text, *buildd)); err != nil {
+		if err := json.NewEncoder(w).Encode(collect(time.Now(), text, *buildd, sensors)); err != nil {
 			log.Printf("encoding status: %v", err)
 		}
 	})
