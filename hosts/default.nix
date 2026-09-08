@@ -70,7 +70,13 @@
 
       hydraJobs.x86_64-linux = {
         laptop-01 = self.nixosConfigurations.laptop-01.config.system.build.toplevel;
-        inherit (self.packages.x86_64-linux) netboot kexec;
+        inherit (self.packages.x86_64-linux)
+          netboot
+          kexec
+          rig-buildd
+          rig-fleetd
+          rig-kiosk-server
+          ;
       };
     };
 }

@@ -40,6 +40,7 @@ func main() {
 	qrPath := flag.String("qr", defaultQR, "SVG of the QR code to display; empty to leave it off")
 	idle := flag.Duration("idle", 10*time.Minute, "how long without input before the screensaver takes over")
 	screensaver := flag.Duration("screensaver", time.Minute, "how long the screensaver runs; zero to leave it off")
+	buildd := flag.String("buildd", "", "base URL of this rig's build daemon; empty leaves the jobs line off the page")
 	flag.Parse()
 
 	log.SetFlags(0) // The journal already stamps every line.
@@ -73,7 +74,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		if err := page.Execute(w, collect(time.Now(), text)); err != nil {
+		if err := page.Execute(w, collect(time.Now(), text, *buildd)); err != nil {
 			// Too late for an error status: the template writes as it renders.
 			log.Printf("rendering page: %v", err)
 		}
@@ -83,7 +84,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 
-		if err := json.NewEncoder(w).Encode(collect(time.Now(), text)); err != nil {
+		if err := json.NewEncoder(w).Encode(collect(time.Now(), text, *buildd)); err != nil {
 			log.Printf("encoding status: %v", err)
 		}
 	})

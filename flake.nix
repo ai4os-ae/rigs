@@ -92,6 +92,19 @@
                 # look at a layout change.
                 packages.rig-kiosk-server = pkgs.callPackage ./pkgs/rig-kiosk-server/package.nix { };
 
+                # The build job daemon. Exposed so it can be built and poked at
+                # off a rig — `nix run .#rig-buildd -- -nixpkgs ... -kernel-build ...`
+                # — without deploying to look at an API change.
+                packages.rig-buildd = pkgs.callPackage ./pkgs/rig-buildd/package.nix { };
+
+                # The fleet broker: one endpoint in front of every rig.
+                packages.rig-fleetd = pkgs.callPackage ./pkgs/rig-fleetd/package.nix { };
+
+                # The browsable API documentation. A directory, meant to be an
+                # nginx root — `nix build .#rig-api-docs` then point a browser
+                # at result/index.html to read it without deploying anything.
+                packages.rig-api-docs = pkgs.callPackage ./pkgs/rig-api-docs/package.nix { };
+
                 # Everything needed to bring a rig up and to rotate its
                 # secrets. `ssh-to-age` is the one non-obvious entry: host age
                 # keys here are derived from each rig's SSH host key rather
@@ -134,6 +147,21 @@
           base = import ./modules/base;
           rig = import ./modules/rig;
         };
+      };
+
+      # The parameterised kernel build, exposed as a function rather than a
+      # package because there is no such thing as "the" kernel build here —
+      # every job names its own commit, patch and configuration. `rig-buildd`
+      # calls this with values off the wire; see nix/kernel-build/example.nix
+      # to drive it by hand.
+      lib.kernelBuildFor = pkgs: pkgs.callPackage ./nix/kernel-build { };
+
+      # For the host that publishes the fleet: it serves the documentation as
+      # a static root, so it needs the package but none of the rest of this
+      # repository. Matches how the other services here are consumed from the
+      # fleet that reverse-proxies them.
+      overlays.default = _final: prev: {
+        rig-api-docs = prev.callPackage ./pkgs/rig-api-docs/package.nix { };
       };
     };
 }

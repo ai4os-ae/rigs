@@ -63,6 +63,29 @@ in
       '';
       type = lib.types.path;
     };
+
+    extraInbound = lib.mkOption {
+      description = ''
+        Additional nebula firewall inbound rules, for a service on this rig
+        that has to be reachable by something the standing policy below does
+        not already admit.
+
+        Rules are matched on the peer's *certificate*, so `host` here is a
+        signed node name rather than an address, and naming one grants nothing
+        to anybody else who reaches the port.
+      '';
+      type = lib.types.listOf (lib.types.attrsOf lib.types.anything);
+      default = [ ];
+      example = lib.literalExpression ''
+        [
+          {
+            host = "hisn";
+            port = 9100;
+            proto = "tcp";
+          }
+        ]
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -135,7 +158,8 @@ in
             port = "any";
             proto = "any";
           }
-        ];
+        ]
+        ++ cfg.extraInbound;
       };
 
       settings = {

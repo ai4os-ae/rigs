@@ -1,0 +1,540 @@
+openapi: 3.1.0
+
+info:
+  title: AI4OS rigs
+  version: "1.0.0"
+  summary: Build Linux kernels on the AI4OS research rigs.
+  description: |
+    Submit a kernel commit, an optional patch and a configuration; a rig builds
+    it and hands back the artifacts, the logs and a report.
+
+    ### `state` and `passed` answer different questions
+
+    This is the one thing worth reading before writing a client.
+
+    `state` is what happened to the *job*. `passed` is whether the *kernel
+    compiled*. A patch that does not build is a perfectly good answer to the
+    question that was asked, so it comes back as `state: succeeded` with
+    `passed: false` and the compiler error in the log.
+
+    `state: failed` means the daemon or the build system itself broke, and you
+    have learned nothing about your patch.
+
+    **So branch on `passed`, never on `state`.**
+
+    ### Why the second build is fast
+
+    A job is built in two stages: an unpatched base for its commit and
+    configuration, then the patch applied on top. The base is shared by every
+    patch against that commit, so only the first one pays for it — measured on
+    a rig, 5m28s for the base and around 20s per patch after that. Submitting
+    an identical job twice returns the second from cache in about a second.
+
+    Nothing about this is visible in the API, and clients need no build tooling
+    of their own.
+
+    ### Identity
+
+    A job id is `<rig>.<id-on-that-rig>`. Builds are reproducible — the build
+    timestamp, host and user are pinned — so the same job on two different rigs
+    produces byte-identical artifacts, and a manifest fetched from one rig is
+    valid against bytes fetched from another.
+
+servers:
+  - url: https://rigs.fleeti.ae
+    description: The fleet broker
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: jobs
+    description: Submitting work and collecting what came out of it.
+  - name: fleet
+    description: What rigs exist and how busy they are.
+
+paths:
+  /v1/jobs:
+    post:
+      tags: [jobs]
+      summary: Submit a build job
+      description: |
+        Places the job on a rig and returns it. Placement prefers a rig that
+        already built this commit and configuration, since that rig has the
+        expensive base in its store; otherwise the shortest queue.
+
+        Use `rig` to pin a machine or `system` to constrain the architecture.
+        Neither is substituted silently: if the named rig is down, or no rig
+        runs that system, this fails with `409` rather than building somewhere
+        you did not ask for.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobRequest"
+            examples:
+              patched:
+                summary: A candidate patch against v6.17
+                value:
+                  kind: build
+                  kernel:
+                    commit: e5f0a698b34ed76002dc5cff3804a61c80233a7a
+                  config:
+                    base: defconfig
+                    set:
+                      CONFIG_ZRAM: m
+                  patch: |
+                    --- a/drivers/block/zram/zram_drv.c
+                    +++ b/drivers/block/zram/zram_drv.c
+                    @@ -2879,6 +2879,8 @@
+                     	struct zram_table_entry zram_te;
+                     	int ret;
+
+                    +	pr_info("zram: hello from a rig\n");
+                    +
+                     	BUILD_BUG_ON(__NR_ZRAM_PAGEFLAGS > sizeof(zram_te.flags) * 8);
+              unpatched:
+                summary: Just the commit, to warm the shared base
+                value:
+                  kernel:
+                    commit: e5f0a698b34ed76002dc5cff3804a61c80233a7a
+                  config:
+                    base: defconfig
+                    set:
+                      CONFIG_ZRAM: m
+              pinned:
+                summary: Pinned to one rig
+                value:
+                  rig: laptop-01
+                  kernel:
+                    commit: e5f0a698b34ed76002dc5cff3804a61c80233a7a
+                  config:
+                    base: defconfig
+      responses:
+        "202":
+          description: Accepted and queued on a rig.
+          headers:
+            Location:
+              schema: { type: string }
+              description: Path of the created job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: |
+            No rig can take this job: the pinned rig is unknown or unreachable,
+            or no live rig runs the requested system.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+    get:
+      tags: [jobs]
+      summary: List jobs across the fleet
+      description: |
+        Every rig's jobs, merged and newest first. A rig that cannot be reached
+        is named in `unreachable` rather than failing the listing — a fleet is
+        expected to have machines that come and go.
+      responses:
+        "200":
+          description: The fleet's jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+                  unreachable:
+                    type: [array, "null"]
+                    description: Rigs that did not answer.
+                    items: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/jobs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      summary: Fetch one job
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [jobs]
+      summary: Cancel a running job, or delete a finished one
+      description: |
+        A running job is cancelled and its record kept, so you can see that it
+        was cancelled; deleting it is a second call.
+
+        Deleting a finished job releases its artifacts to garbage collection —
+        while the job exists, its output is pinned on the rig.
+      responses:
+        "202":
+          description: Cancellation started.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, examples: [cancelling] }
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs/{id}/log:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - name: offset
+        in: query
+        description: |
+          Resume from this byte position. A client whose connection dropped
+          mid-build picks up where it stopped instead of re-reading half an
+          hour of output.
+        schema: { type: integer, minimum: 0 }
+      - name: follow
+        in: query
+        description: |
+          Set to `1` to hold the response open and stream output as the build
+          produces it, until the job reaches a terminal state.
+        schema: { type: string, enum: ["1"] }
+    get:
+      tags: [jobs]
+      summary: Read or follow the build log
+      responses:
+        "200":
+          description: Log output, streamed when following.
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such job, or it has not started and has no log yet.
+
+  /v1/jobs/{id}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      summary: List the artifacts, with hashes
+      description: |
+        Sizes and SHA-256 for every file the build produced, computed inside
+        the build sandbox — so a client can verify what it downloads against a
+        manifest the build itself wrote, rather than one the server asserts.
+      responses:
+        "200":
+          description: The manifest.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: object
+                    additionalProperties:
+                      $ref: "#/components/schemas/Artifact"
+                examples:
+                  - artifacts:
+                      bzImage:
+                        size: 14222336
+                        sha256: 161f1ce064f11829e7dd1871ac04d3bf48825955a7f623077fa84c68400577c8
+                      vmlinux:
+                        size: 52056392
+                        sha256: 4f71fd5c70e62e0507678eac83ff410964076e66e46f5d726a5574de5ef247b8
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: The job has produced no artifacts yet.
+
+  /v1/jobs/{id}/artifacts/{path}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - name: path
+        in: path
+        required: true
+        description: |
+          Path as it appears in the manifest, for example `bzImage`, `vmlinux`,
+          `config`, `report.json`, or
+          `modules/lib/modules/6.17.0/kernel/drivers/block/zram/zram.ko`.
+        schema: { type: string }
+    get:
+      tags: [jobs]
+      summary: Download one artifact
+      responses:
+        "200":
+          description: The file.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/jobs/{id}/bundle.tar.gz:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      summary: Download the whole output tree
+      description: |
+        Everything the build produced, as one stream, with the layout intact.
+        This is what to fetch when you need a walkable tree rather than a few
+        named files — resolving a module's dependencies means globbing for
+        `.ko` files and reading `modules.dep` beside them.
+      responses:
+        "200":
+          description: gzipped tar of the build output.
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: The job has produced no artifacts yet.
+
+  /v1/rigs:
+    get:
+      tags: [fleet]
+      summary: What rigs exist and how busy they are
+      description: |
+        Polled in the background rather than on demand, so `checked_at` says
+        how fresh each answer is. Useful for choosing a `system`, or for
+        deciding whether to pin.
+      responses:
+        "200":
+          description: The fleet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rigs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Rig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status:
+    get:
+      tags: [fleet]
+      summary: The broker itself
+      responses:
+        "200":
+          description: Broker health.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hostname: { type: string }
+                  time: { type: string, format: date-time }
+                  rigs: { type: integer, description: Rigs configured. }
+                  rigs_up: { type: integer, description: Rigs answering. }
+                  jobs_open:
+                    type: integer
+                    description: Jobs queued or running across the fleet.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        An API key issued for this fleet. Every endpoint needs one — there is
+        no unauthenticated path, including the status endpoints, which would
+        otherwise enumerate the fleet.
+
+  parameters:
+    JobId:
+      name: id
+      in: path
+      required: true
+      description: |
+        `<rig>.<id-on-that-rig>`, exactly as returned when the job was
+        submitted. The rig name in it is what routes the request.
+      schema:
+        type: string
+        examples: ["laptop-01.20260908T091828-0221e5cfee685827"]
+
+  responses:
+    Unauthorized:
+      description: Missing or unrecognised API key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such job, or no such rig in this fleet.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: The job was malformed or asked for something unsupported.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: The rig could not be reached.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          examples: ['no rig named "laptop-99" in this fleet']
+
+    JobRequest:
+      type: object
+      required: [kernel]
+      properties:
+        kind:
+          type: string
+          default: build
+          enum: [build]
+          description: |
+            Boot tests and fuzz runs will appear here. Read `kinds` from
+            `/v1/rigs` rather than assuming a rig supports one.
+        kernel:
+          type: object
+          required: [commit]
+          properties:
+            commit:
+              type: string
+              pattern: "^[0-9a-f]{40}$"
+              description: |
+                A full 40-character commit. Not a tag or a branch: a job has to
+                mean the same thing tomorrow.
+            remote:
+              type: string
+              description: |
+                Where to fetch the commit if the rig's mirror lacks it.
+                Defaults to the rig's configured kernel remote, which is the
+                normal case.
+        patch:
+          type: string
+          description: |
+            A unified diff, applied with `patch -p1`. Omit it to build the
+            commit as-is, which is how you warm the shared base before
+            submitting patches against it.
+        config:
+          type: object
+          properties:
+            base:
+              type: string
+              default: defconfig
+              description: A kernel make target — `defconfig`, `tinyconfig`.
+            set:
+              type: object
+              additionalProperties:
+                type: string
+                enum: [y, m, n]
+              description: |
+                Symbol overrides applied on top of the base, with or without
+                the `CONFIG_` prefix. Values are `y`, `m` or `n` and nothing
+                else: this is data, not a hook for make commands.
+
+                Every symbol is re-read from the resulting `.config` and the
+                build fails if one was dropped — a symbol lost to an unmet
+                dependency would otherwise produce a kernel that quietly lacks
+                the driver under test, which is worse than failing.
+        arch:
+          type: string
+          default: x86_64
+          enum: [x86_64]
+        rig:
+          type: string
+          description: Pin to this rig by name. Fails with 409 if it is down.
+        system:
+          type: string
+          description: |
+            Constrain to rigs of this system, matched against what each rig
+            reports. Derived from `arch` when omitted.
+          examples: [x86_64-linux]
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          examples: ["laptop-01.20260908T091828-0221e5cfee685827"]
+        rig: { type: string, examples: [laptop-01] }
+        state:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+          description: |
+            What happened to the job. `succeeded` means it ran to completion —
+            it does **not** mean the kernel compiled. See `passed`.
+        passed:
+          type: [boolean, "null"]
+          description: |
+            Whether the kernel compiled and its configuration verified. Null
+            until the job finishes. **This is the field that judges a patch.**
+        error:
+          type: string
+          description: "Set when `state` is `failed`: why the rig could not answer."
+        kernel_release:
+          type: string
+          examples: ["6.17.0"]
+        store_path:
+          type: string
+          description: |
+            Where the output lives on the rig. Content-addressed and
+            reproducible, so it identifies the build rather than merely
+            locating it.
+        submitted_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        spec:
+          $ref: "#/components/schemas/JobRequest"
+
+    Artifact:
+      type: object
+      properties:
+        size: { type: integer }
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Computed inside the build sandbox.
+        symlink:
+          type: string
+          description: Present instead of size/sha256 when the entry is a link.
+
+    Rig:
+      type: object
+      properties:
+        name: { type: string, examples: [laptop-01] }
+        url: { type: string, description: The rig's own build daemon, on the mesh. }
+        up: { type: boolean }
+        error: { type: string, description: Why it did not answer, when down. }
+        system: { type: string, examples: [x86_64-linux] }
+        queue_depth: { type: integer }
+        running: { type: integer }
+        capacity:
+          type: integer
+          description: |
+            Builds it will run at once. Normally 1 — a kernel build already
+            uses every thread on the machine.
+        load:
+          type: array
+          items: { type: number }
+          description: 1, 5 and 15 minute load averages.
+        store_free_bytes: { type: integer }
+        kinds:
+          type: array
+          items: { type: string }
+          description: Job kinds this rig implements.
+        checked_at:
+          type: string
+          format: date-time
+          description: When the broker last heard from it.

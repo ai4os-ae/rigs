@@ -36,6 +36,15 @@ modules/
     wifi.nix       wpa_supplicant, for rigs with no ethernet
     autoupgrade.nix
   rig/             unattended always-on behaviour (lid, watchdog, oomd)
+    buildd.nix     the build job daemon, on every rig
+    fleetd.nix     the broker in front of them
+nix/
+  kernel-build/    parameterised two-stage Linux kernel builds
+pkgs/
+  rig-api-docs/    OpenAPI spec + Swagger UI, served as the public root
+  rig-buildd/      the job daemon itself (Go, stdlib only)
+  rig-fleetd/      the fleet broker
+  rig-kiosk-server/
 secrets/           sops-encrypted, one file per rig plus all.yaml
 ```
 
@@ -240,6 +249,210 @@ Both halves go into that rig's sops file under `nebula/crt` and `nebula/key`
 be copied onto the rig by hand), owned by `nebula-sifr0` — nebula reads them
 after dropping privileges. Then add the address to the `hosts` map in
 `modules/base/nebula.nix` so the rest of the fleet can use the name.
+
+## Build jobs
+
+Running jobs is what a rig is for, and `rig-buildd` is how work gets to one.
+Post a kernel commit, an optional patch and a configuration; the rig builds it
+and serves back the artifacts, the logs and a report.
+
+There is no central server and no agent polling one. Rigs have fixed mesh
+addresses and already accept inbound connections from `ai4os` and `trusted`, so
+a client connects to the rig it wants and picks between rigs itself using
+`/v1/status`. Nebula has authenticated and encrypted the connection before the
+daemon sees it, and the host firewall trusts `sifr0` and nothing else, so the
+API is not exposed to whatever network the rig has joined.
+`rigs.buildd.tokenFile` adds a bearer token for when that stops being enough.
+
+| Method   | Path                              |                                               |
+|----------|-----------------------------------|-----------------------------------------------|
+| `POST`   | `/v1/jobs`                        | submit; returns the job                       |
+| `GET`    | `/v1/jobs`                        | list, newest first                            |
+| `GET`    | `/v1/jobs/{id}`                   | state, timings, whether the build passed      |
+| `DELETE` | `/v1/jobs/{id}`                   | cancel if running, otherwise delete           |
+| `GET`    | `/v1/jobs/{id}/log`               | `?offset=N&follow=1`                          |
+| `GET`    | `/v1/jobs/{id}/artifacts`         | manifest with sizes and sha256                |
+| `GET`    | `/v1/jobs/{id}/artifacts/{path}`  | one file                                      |
+| `GET`    | `/v1/jobs/{id}/bundle.tar.gz`     | the whole output tree                         |
+| `GET`    | `/v1/status`                      | load, free space, queue, mirror state         |
+
+```
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "build",
+  "kernel": { "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449" },
+  "config": { "base": "defconfig", "set": { "CONFIG_ZRAM": "m" } },
+  "patch": "--- a/drivers/block/zram/zram_drv.c\n+++ ..."
+}'
+```
+
+Symbol values are `y`, `m` or `n` and nothing else — this is data, not a place
+to smuggle in make commands. Every requested symbol is re-read from the
+resulting `.config` and a build that lost one fails, because a symbol silently
+dropped for unmet dependencies otherwise produces a kernel that quietly lacks
+the driver under test.
+
+**A failed compile is a successful job.** The job is `succeeded` and the report
+says `passed: false`, with the compiler error in the logs. `failed` is reserved
+for the daemon or Nix breaking, meaning the caller learned nothing about their
+patch.
+
+### Why it is fast the second time
+
+Builds run under Nix, which is not visible in the API but is the reason the
+same work is never done twice. A job is split in two: an unpatched base for its
+(commit, configuration), and the patch applied on top of it. The base is shared
+by every patch against that commit, so only the first one pays for it.
+
+Measured on `laptop-01` (12 threads), x86_64 `defconfig` at v6.18. The patched
+stage recompiles one source file and relinks:
+
+```
+base           5m28s    once per commit and configuration
+patched          22s    per candidate patch
+resubmitted       1s    identical job, straight from the store
+```
+
+### Builds are reproducible, and that is deliberate
+
+A kernel stamps the time, host and user that built it into the image and into
+every module's `vermagic`. Left alone, two rigs building the same job produce
+different bytes under the *same* store path — Nix derives that path from the
+inputs, not from the result — so a manifest fetched from one rig would not
+match bytes fetched from another, which is a tedious thing to discover later.
+
+`nix/kernel-build` pins `KBUILD_BUILD_TIMESTAMP`, `KBUILD_BUILD_USER` and
+`KBUILD_BUILD_HOST`, so it does not happen. Verified: the same job built on a
+64-thread AMD workstation and on `laptop-01` produced all 28 artifacts
+byte-identical. A client may therefore treat the store path as an identity and
+send the two halves of a comparison to two different rigs.
+
+### The kernel mirror
+
+A job carries a commit hash, not a source tree — 1.5GB per job over campus
+wireless is exactly what this avoids. Each rig keeps a bare clone at
+`/var/lib/rig/buildd/linux.git` and fetches a commit it does not have.
+
+**The first job on a new rig clones the whole kernel before it builds
+anything** — around ten minutes and 6.8GB for the stable tree, plus about as
+much again the first time Nix imports a revision into its own git cache. Watch
+`mirror.present` in `/v1/status`, or seed the mirror by hand, before concluding
+that a rig is slow.
+
+### State
+
+Everything is under `/var/lib/rig/buildd/jobs/<id>/` as plain files — no
+database:
+
+```
+job.json         the job and its state
+job.nix          the generated expression; `nix build -f` it to reproduce by hand
+log              the build log
+candidate.patch  the patch, if there was one
+result           symlink into the store — and the GC root
+```
+
+That `result` link is load-bearing. It is what stops the nightly garbage
+collection removing a finished job's artifacts before anybody fetched them, so
+deleting a job is what releases its disk space.
+
+## The fleet broker
+
+Talking to a rig directly is fine while there is one rig and a person choosing
+it. `rig-fleetd` puts a single endpoint in front of all of them: it decides
+which rig a job runs on, forwards it, and proxies everything afterwards, so a
+client sees a fleet rather than a list of machines.
+
+Unlike a rig, it is meant to be **published** — reverse-proxied from a host
+with a public address — so every request carries an API key and there is no
+unauthenticated path through it, not even `/v1/status`, which would otherwise
+enumerate the fleet. It still listens on the mesh only; exposing it is the
+reverse proxy's job.
+
+| Method   | Path                       |                                          |
+|----------|----------------------------|------------------------------------------|
+| `POST`   | `/v1/jobs`                 | place and submit                         |
+| `GET`    | `/v1/jobs`                 | every rig's jobs, merged, newest first   |
+| `GET`    | `/v1/rigs`                 | the fleet: liveness, system, queue, disk |
+| `GET`    | `/v1/status`               | the broker itself                        |
+
+Browsable at the root of that name: `pkgs/rig-api-docs` builds a Swagger UI and
+the OpenAPI spec into a directory, which the publishing host serves as the
+vhost's root while `/v1/` continues to proxy. The docs are unauthenticated —
+somebody who lands on the fleet's one public name should find out what it does
+rather than a `401` — and everything they describe is not.
+
+The spec is written by hand and checked in, so it is reviewed like the code it
+describes rather than generated from it and believed; the build parses it, so a
+typo fails there rather than rendering an empty page. Read it without deploying
+anything:
+
+```
+nix build .#rig-api-docs && xdg-open result/index.html
+```
+| *others* | `/v1/jobs/{id}/…`          | as `rig-buildd`, proxied                 |
+
+```
+curl -H "Authorization: Bearer $KEY" -X POST https://…/v1/jobs -d '{
+  "kernel": { "commit": "7d0a66e…" },
+  "config": { "base": "defconfig", "set": { "CONFIG_ZRAM": "m" } },
+  "system": "x86_64-linux",
+  "patch":  "--- a/drivers/…"
+}'
+```
+
+Two optional fields on top of a rig's job envelope: `rig` pins it to a machine
+by name, and `system` constrains it to an architecture (matched against what
+each rig reports, so it stays right when the fleet is no longer all x86). Both
+fail with `409` rather than quietly substituting — somebody who named a rig
+wants that rig.
+
+**Job ids are `<rig>.<id-on-that-rig>`.** That is the whole routing table: the
+broker keeps no job state, so there is nothing to hold in step with the rigs
+and nothing lost when it restarts.
+
+### How a rig is chosen
+
+When neither `rig` nor a constraint decides it, among live rigs of the right
+system:
+
+1. **The rig that last built this `(commit, configuration)`** — it already has
+   the expensive base in its store, which is a 22s job against a 5m28s one, and
+   is by far the largest lever available. Skipped if that rig is already
+   backed up: a warm store is not worth queueing behind other builds.
+2. Otherwise the shortest queue, with free disk breaking ties.
+
+That hint lives in `fleetd/affinity.json` and is only ever a hint — losing it
+costs one slow build.
+
+### Keys
+
+One per line in a sops secret, `#` comments and blank lines ignored so each key
+can record whose it is, which is the difference between revoking one and
+rotating all of them. The service restarts when the secret changes, so removing
+a key takes effect without anybody remembering to.
+
+### Publishing it
+
+The broker is published at **`https://rigs.fleeti.ae`**, served by `hisn` and
+proxied to `10.10.0.60:9100` over the mesh.
+
+Two halves, in two repositories, and it is a 504 without both:
+
+- **The vhost**, on `hisn`, which is configured from the personal dotfiles
+  repository and not from here.
+- **The mesh rule**, here. Rigs admit `trusted` and `ai4os`, and `hisn` is
+  deliberately in neither — it is a rented machine with a public address, and
+  giving it what a personal laptop has to reach a rig would be a poor trade
+  for one vhost. `rigs.fleetd.reverseProxy = "hisn"` admits that one node to
+  the broker's port and nothing else. It is matched on the peer's signed
+  certificate name rather than its address, so naming it grants nothing to
+  anybody else who reaches the port.
+
+The vhost needs three things that are not nginx defaults, all for the same
+reason — a build is long and its output is a stream: `proxy_read_timeout` well
+past an hour, `proxy_buffering off` so a followed log arrives as it is
+produced, and `client_max_body_size` above 1M so a large patch is not rejected
+before the broker sees it.
 
 ## Laptop rigs
 

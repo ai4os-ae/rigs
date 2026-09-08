@@ -41,6 +41,30 @@
     rig.enable = true;
     autoupgrade.enable = true;
 
+    # Kernel build jobs, over the mesh. 12 threads and 32GB, which is one
+    # kernel build at a time.
+    buildd.enable = true;
+
+    # And, for now, the fleet's front door. It runs on a rig because there is
+    # nowhere else in this repository to put it; it places work rather than
+    # doing any, so sharing a machine with a build costs little. Move it to a
+    # rig that does not build once there is more than one.
+    fleetd = lib.mkIf (!config.rigs.bootstrap) {
+      enable = true;
+      apiKeysFile = config.sops.secrets."fleetd/api-keys".path;
+
+      # rigs.fleeti.ae is served by hisn, which proxies to this port over the
+      # mesh. hisn is the lighthouse and a public VPS, so it holds neither
+      # `trusted` nor `ai4os`; this admits it to the broker and nothing else.
+      reverseProxy = "hisn";
+      members = [
+        {
+          name = "laptop-01";
+          url = "http://10.10.0.60:9000";
+        }
+      ];
+    };
+
     # A Latitude on a desk in a shared room: the charger is the nearest one to
     # borrow and the lid is the obvious thing to close on a machine that looks
     # idle. Both now beep until they are put back.
@@ -84,6 +108,15 @@
   };
 
   sops.secrets = lib.mkIf (!config.rigs.bootstrap) {
+    # The keys the fleet broker admits. Owned by its own user, which reads them
+    # after systemd has dropped privileges, and restarting on change is what
+    # makes revoking a key take effect without a person remembering to.
+    "fleetd/api-keys" = {
+      sopsFile = ../../secrets/laptop-01.yaml;
+      owner = "rig-fleetd";
+      restartUnits = [ "rig-fleetd.service" ];
+    };
+
     "wifi/env" = {
       sopsFile = ../../secrets/laptop-01.yaml;
 

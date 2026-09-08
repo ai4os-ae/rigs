@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI4OS rigs — build API</title>
+
+    <!-- Everything is served from this derivation, next to this file. No CDN:
+         the page has to work from a machine that can reach the rigs and
+         nothing else, and a docs page that silently depends on the public
+         internet is a docs page that breaks in the lab. -->
+    <link rel="stylesheet" href="./swagger-ui.css" />
+    <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
+    <style>
+      body {
+        margin: 0;
+        background: #fafafa;
+      }
+      /* The stock topbar is a URL box for loading other specs, which is not
+         useful when the page ships with the only spec it will ever show. */
+      .swagger-ui .topbar {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+
+    <script src="./swagger-ui-bundle.js"></script>
+    <script src="./swagger-ui-standalone-preset.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: "./openapi.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: "BaseLayout",
+
+        // Try-it-out is the point of hosting this next to the API rather than
+        // as a static document: the spec's server is this same origin, so a
+        // key pasted into Authorize exercises the real fleet.
+        tryItOutEnabled: true,
+        persistAuthorization: true,
+
+        // Ordered as the docs read rather than alphabetically, so submitting a
+        // job comes before collecting what it produced.
+        operationsSorter: null,
+        tagsSorter: null,
+
+        defaultModelsExpandDepth: 1,
+        docExpansion: "list",
+      });
+    </script>
+  </body>
+</html>

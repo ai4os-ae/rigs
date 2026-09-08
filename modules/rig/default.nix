@@ -4,6 +4,8 @@ let
 in
 {
   imports = [
+    ./buildd.nix
+    ./fleetd.nix
     ./kiosk.nix
     ./laptop.nix
   ];

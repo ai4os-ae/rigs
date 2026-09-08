@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -42,6 +45,11 @@ type Status struct {
 	Load       string    `json:"load"`
 	Addresses  []Address `json:"addresses"`
 	Time       string    `json:"time"`
+
+	// What the build daemon is doing, as one short line. Empty when this rig
+	// runs no build daemon, in which case the page leaves the row out
+	// altogether rather than showing a permanently blank fact.
+	Jobs string `json:"jobs"`
 }
 
 // Address is one usable address on one interface. Loopback and link-local are
@@ -55,8 +63,9 @@ type Address struct {
 func (a Address) String() string { return a.Interface + "  " + a.IP }
 
 // collect gathers the current state. Everything is read fresh on each request
-// — the page polls, and these are cheap reads of /proc and a netlink dump.
-func collect(now time.Time, text Text) Status {
+// — the page polls, and these are cheap reads of /proc and a netlink dump,
+// plus one request to the build daemon on loopback.
+func collect(now time.Time, text Text, buildd string) Status {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
@@ -74,6 +83,7 @@ func collect(now time.Time, text Text) Status {
 		Addresses: addresses(),
 		Time:      now.Format("Mon 2 Jan 15:04"),
 		Uptime:    "unknown",
+		Jobs:      buildJobs(buildd),
 	}
 
 	if up, err := uptime(); err == nil {
@@ -83,6 +93,52 @@ func collect(now time.Time, text Text) Status {
 	}
 
 	return s
+}
+
+// The page polls every few seconds, so a build daemon that has stopped
+// answering must not hold the whole status response open. A short timeout on
+// loopback is generous.
+var builddClient = &http.Client{Timeout: 800 * time.Millisecond}
+
+// buildJobs asks the build daemon what it is doing and reduces it to one line.
+//
+// This is read from across a room by somebody deciding whether the rig is busy,
+// so it is a count and not a job list: which jobs they are is a question for
+// the API, which is where anybody who needs the answer already is.
+func buildJobs(buildd string) string {
+	if buildd == "" {
+		return ""
+	}
+
+	resp, err := builddClient.Get(buildd + "/v1/status")
+	if err != nil {
+		return "unavailable"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "unavailable"
+	}
+
+	var status struct {
+		QueueDepth int      `json:"queue_depth"`
+		Running    []string `json:"running"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&status); err != nil {
+		return "unavailable"
+	}
+
+	running := len(status.Running)
+	switch {
+	case running == 0 && status.QueueDepth == 0:
+		return "idle"
+	case status.QueueDepth == 0:
+		return fmt.Sprintf("%d building", running)
+	case running == 0:
+		return fmt.Sprintf("%d queued", status.QueueDepth)
+	default:
+		return fmt.Sprintf("%d building · %d queued", running, status.QueueDepth)
+	}
 }
 
 // uptime reads /proc/uptime rather than shelling out to `uptime`, whose output

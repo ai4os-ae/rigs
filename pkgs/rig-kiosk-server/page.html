@@ -432,6 +432,13 @@
         <dt>Load</dt>
         <dd id="load">{{ .Load }}</dd>
       </div>
+
+      {{ if .Jobs }}
+        <div class="fact">
+          <dt>Jobs</dt>
+          <dd id="jobs">{{ .Jobs }}</dd>
+        </div>
+      {{ end }}
     </dl>
 
     <footer>
@@ -467,6 +474,13 @@
 
         document.getElementById("uptime").textContent = status.uptime;
         document.getElementById("load").textContent = status.load;
+
+        // Absent on a rig with no build daemon: the row is left out of the
+        // markup entirely rather than sitting there permanently blank.
+        const jobs = document.getElementById("jobs");
+        if (jobs && status.jobs) {
+          jobs.textContent = status.jobs;
+        }
         document.getElementById("time").textContent = status.time;
         document.getElementById("booted").textContent = status.booted_at;
 

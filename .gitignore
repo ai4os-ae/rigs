@@ -17,3 +17,6 @@ CLAUDE.md
 !.claude/skills/
 .aider*
 .direnv/
+
+# Python bytecode, from running nix/kernel-build/report.py by hand
+__pycache__/

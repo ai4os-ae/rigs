@@ -149,6 +149,16 @@ in
       defaultText = lib.literalExpression ''"http://''${config.rigs.kiosk.server.listen}/"'';
     };
 
+    buildd = mkOption {
+      description = ''
+        Base URL of this rig's build daemon, for the jobs line on the page.
+        Set for you when `rigs.buildd` is enabled; empty leaves the line off
+        entirely rather than showing a row that never says anything.
+      '';
+      type = types.str;
+      default = "";
+    };
+
     server = {
       package = mkOption {
         description = "The status page server itself.";
@@ -192,25 +202,31 @@ in
       ];
 
       serviceConfig = {
-        ExecStart = lib.escapeShellArgs [
-          (lib.getExe cfg.server.package)
-          "-listen"
-          cfg.server.listen
-          "-heading"
-          cfg.heading
-          "-subheading"
-          cfg.subheading
-          "-warning"
-          cfg.warning
-          "-link"
-          cfg.link
-          "-qr"
-          qr
-          "-idle"
-          cfg.screensaver.idle
-          "-screensaver"
-          cfg.screensaver.duration
-        ];
+        ExecStart = lib.escapeShellArgs (
+          [
+            (lib.getExe cfg.server.package)
+            "-listen"
+            cfg.server.listen
+            "-heading"
+            cfg.heading
+            "-subheading"
+            cfg.subheading
+            "-warning"
+            cfg.warning
+            "-link"
+            cfg.link
+            "-qr"
+            qr
+            "-idle"
+            cfg.screensaver.idle
+            "-screensaver"
+            cfg.screensaver.duration
+          ]
+          ++ lib.optionals (cfg.buildd != "") [
+            "-buildd"
+            cfg.buildd
+          ]
+        );
 
         Restart = "always";
         RestartSec = "2s";
