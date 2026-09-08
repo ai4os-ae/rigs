@@ -20,3 +20,11 @@ CLAUDE.md
 
 # Python bytecode, from running nix/kernel-build/report.py by hand
 __pycache__/
+
+# `go build` in a package directory drops a ten-megabyte binary next to the
+# source and names it after the directory. Nothing builds these for real — the
+# packages under pkgs/ are built by Nix — so they are only ever scratch, and a
+# binary that large is not something to discover in git history later.
+/pkgs/rig-buildd/rig-buildd
+/pkgs/rig-fleetd/rig-fleetd
+/pkgs/rig-kiosk-server/rig-kiosk-server

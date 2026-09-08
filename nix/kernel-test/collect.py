@@ -239,7 +239,11 @@ def collect(args):
     if done is None:
         reasons.append("the guest stopped before finishing the run")
     elif done != 0:
-        reasons.append("a test phase failed")
+        # Named, not merely counted. "a test phase failed" sends the reader to
+        # the logs to find out which one, and the whole point of a verdict is
+        # to say what happened without that.
+        failed = [f"{p['name']} (exit {p['returncode']})" for p in phases if p["returncode"] != 0]
+        reasons.append("failed: " + ", ".join(failed) if failed else "the guest reported a failure")
     if splats:
         reasons.append(f"the kernel log contains {len(splats)} splat(s)")
     if truncated:
