@@ -20,13 +20,22 @@ type Status struct {
 	// same architecture, which stops being true the moment an arm board joins.
 	System string `json:"system"`
 
-	// What this rig can be asked for. Fuzz runs will appear here when their
-	// backend does; a client should look rather than assume.
+	// What this rig can be asked for. Not every rig runs every kind — fuzzing
+	// needs syzkaller and a kernel-fuzz expression pinned into the unit — so a
+	// client should look rather than assume.
 	Kinds []string `json:"kinds"`
 
 	QueueDepth int      `json:"queue_depth"`
 	Running    []string `json:"running"`
 	Capacity   int      `json:"capacity"`
+
+	// Fuzzing is reported separately because queue depth is the wrong question
+	// for it. A rig with an empty queue whose only fuzz slot is four hours into
+	// a campaign is not available for another one, and a broker that reads
+	// queue_depth alone would place one there anyway.
+	FuzzQueueDepth int `json:"fuzz_queue_depth"`
+	FuzzSlotsFree  int `json:"fuzz_slots_free"`
+	FuzzCapacity   int `json:"fuzz_capacity"`
 
 	Load           []float64 `json:"load"`
 	UptimeSeconds  int64     `json:"uptime_seconds"`
@@ -38,14 +47,22 @@ type Status struct {
 func collectStatus(runner *Runner, mirror *Mirror) Status {
 	hostname, _ := os.Hostname()
 
+	kinds := []string{string(KindBuild), string(KindTest)}
+	if runner.cfg.Limits.FuzzEnabled {
+		kinds = append(kinds, string(KindFuzz))
+	}
+
 	return Status{
 		Hostname:       hostname,
 		System:         nixSystem(),
 		Time:           time.Now().UTC(),
-		Kinds:          []string{string(KindBuild), string(KindTest)},
+		Kinds:          kinds,
 		QueueDepth:     runner.QueueDepth(),
 		Running:        runner.Running(),
-		Capacity:       runner.capacity,
+		Capacity:       runner.cfg.Capacity,
+		FuzzQueueDepth: runner.FuzzQueueDepth(),
+		FuzzSlotsFree:  runner.FuzzSlotsFree(),
+		FuzzCapacity:   runner.cfg.FuzzCapacity,
 		Load:           loadAverage(),
 		UptimeSeconds:  uptime(),
 		StoreFreeBytes: freeBytes("/nix/store"),
@@ -102,6 +119,37 @@ func uptime() int64 {
 		return 0
 	}
 	return int64(seconds)
+}
+
+// numCPU and totalMemoryMB are what sizeVMs works from: a fuzz job's VM pool
+// is sized against the machine rather than against the request, because a pool
+// that overcommits memory does not fail, it thrashes.
+//
+// runtime.NumCPU rather than /proc/cpuinfo because it respects a CPU affinity
+// mask, and a daemon confined by systemd to a subset of the machine should
+// size its VMs against the subset it actually has.
+func numCPU() int { return runtime.NumCPU() }
+
+func totalMemoryMB() int {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return int(kb / 1024)
+	}
+	return 0
 }
 
 // freeBytes reports space available on the filesystem holding path. Worth

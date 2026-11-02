@@ -1,0 +1,96 @@
+{
+	# Directed fuzzing profile for the e1000 NIC driver.
+	#
+	# A profile is everything one campaign needs that is not the kernel: the
+	# focus areas, the configuration symbols the target wants, and any VM
+	# changes required to make the target reachable at all. A request names one
+	# with `"fuzz": {"profile": "e1000"}` and may merge its own `focus` over it.
+	#
+	# Whole-line # comments are stripped before this is parsed. That is not a
+	# local invention: syzkaller's own config parser does the same (pkg/config's
+	# LoadData), and these files are worth more with the reasoning left in them
+	# than they are as strict JSON.
+
+	"description": "The e1000 NIC driver's control surface, reached through syzkaller's NIC-VF pass-through",
+
+	# THE DRIVER IS NOT REACHABLE WITHOUT THE DEVICE BELOW, and this is the
+	# whole reason this profile exists rather than being three lines of focus
+	# areas in a request.
+	#
+	# The VM's only e1000 is eth0, which the syscall descriptions deliberately
+	# exclude -- it is the SSH lifeline -- and which stays behind in the init
+	# network namespace when the executor unshares CLONE_NEWNET, something it
+	# does even under sandbox=none. So a run focused on e1000 with no extra
+	# device weights a driver it can never enter, and reports a great deal of
+	# effort and no coverage.
+	#
+	# The way in is syzkaller's NIC-VF pass-through. Despite the name it needs
+	# no physical card and no SR-IOV: setup_nicvf() in
+	# executor/executor_linux.h only checks that a PCI device exists at
+	# 0000:00:11.0, and find_vf_interface() then picks the interface whose
+	# ethtool bus_info matches that address -- e1000 fills bus_info from
+	# pci_name(), so an emulated one matches. The executor moves that device
+	# into the fuzzing namespace and renames it nicvf0, a name the descriptions
+	# already carry in `devnames`, which opens up ioctl$sock_SIOCETHTOOL and the
+	# ifreq ioctls against the driver.
+	#
+	# The address must stay high. syzkaller appends its own NIC after whatever
+	# is configured here, so its device takes a low slot and is enumerated
+	# first, which is what makes it eth0 and what makes guest-init.sh's static
+	# addressing land on the right interface. Put this device low and sshd
+	# answers on the wrong network; every VM is then reported as having failed
+	# to boot.
+	"vm": {
+		"devices": [
+			{ "type": "e1000", "addr": "0x11", "netdev": "user-restricted" }
+		]
+	},
+
+	# There is one such device per VM and the grab is racy: the first proc to
+	# find it moves it into its own namespace and the others see nothing
+	# (upstream says as much in setup_nicvf()). Fewer procs per VM means a
+	# larger share of the execs run with nicvf0 actually present.
+	"procs": 2,
+
+	# Forced on regardless by nix/kernel-fuzz/config.nix, since it is also how
+	# syz-manager reaches the VM. Stated anyway, because a profile should say
+	# what its target needs rather than rely on something else happening to
+	# want the same thing.
+	"config": {
+		"CONFIG_E1000": "y"
+	},
+
+	# The catch-all is NOT here, and must not be added. rig-buildd appends it
+	# itself from `background_weight` -- see the comment on FocusSpec in
+	# pkgs/rig-buildd/fuzz.go. A focus_areas list with no empty-filter entry
+	# makes syzkaller ignore every part of the kernel outside the filters
+	# rather than merely deprioritising it, which throws away the general
+	# coverage signal. Leaving that impossible to express is the point.
+	"focus": [
+		{
+			"name": "e1000",
+			"files": [
+				"drivers/net/ethernet/intel/e1000/"
+			],
+			"weight": 10.0
+		},
+
+		# The paths into the driver. e1000's ndo_* and ethtool ops are only
+		# ever entered through these, so weighting them gives the fuzzer a
+		# gradient to follow rather than a cliff.
+		{
+			"name": "netdev-core",
+			"files": [
+				"net/ethtool/",
+				"net/core/dev_ioctl.c"
+			],
+			"weight": 3.0
+		}
+	]
+
+	# WHAT THIS CANNOT REACH, so that nobody spends a week finding out. Only
+	# the driver's control surface is reachable through syscalls. The RX path,
+	# the interrupt handler and descriptor-ring processing are driven by the
+	# emulated device rather than by anything userspace can call, so no amount
+	# of weighting will enter them.
+}

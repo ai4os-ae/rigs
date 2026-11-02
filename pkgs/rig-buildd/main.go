@@ -39,7 +39,21 @@ func main() {
 	nixpkgs := flag.String("nixpkgs", "", "store path of the nixpkgs the builds evaluate against (required)")
 	kernelBuild := flag.String("kernel-build", "", "store path of the kernel-build expression (required)")
 	kernelTest := flag.String("kernel-test", "", "store path of the kernel-test expression (required)")
+	kernelFuzz := flag.String("kernel-fuzz", "", "store path of the kernel-fuzz expression; empty disables fuzz jobs")
+	syzkallerPkg := flag.String("syzkaller", "", "store path of the syzkaller package expression; required with -kernel-fuzz")
 	capacity := flag.Int("max-concurrent", 1, "builds to run at once; a kernel build wants the whole machine")
+
+	// A fuzz run holds its slot for hours, so it gets its own. One is almost
+	// always right: the VM pool is already sized to most of the machine.
+	fuzzCapacity := flag.Int("max-concurrent-fuzz", 1, "fuzz runs to allow at once")
+	maxFuzzDuration := flag.Int("max-fuzz-duration", 24*3600, "longest fuzz run this rig accepts, in seconds")
+	fuzzVMCPU := flag.Int("fuzz-vm-cpu", 4, "vCPUs per fuzzing VM")
+	fuzzVMMemory := flag.Int("fuzz-vm-memory-mb", 3072, "MiB per fuzzing VM; below 3072 the executor cannot map its data segment")
+	fuzzReserveMB := flag.Int("fuzz-host-reserve-mb", 24576, "MiB held back from the fuzzing VMs for the host")
+	fuzzReserveCPU := flag.Int("fuzz-host-reserve-cpu", 2, "cores held back from the fuzzing VMs for the host")
+	fuzzDevices := flag.String("fuzz-devices", "e1000,virtio-net-pci,virtio-rng-pci,nvme",
+		"comma-separated QEMU device types a fuzz job may ask for")
+
 	tokenFile := flag.String("token-file", "", "file holding a bearer token; empty means rely on the mesh alone")
 	flag.Parse()
 
@@ -47,6 +61,11 @@ func main() {
 
 	if *nixpkgs == "" || *kernelBuild == "" || *kernelTest == "" {
 		log.Fatal("-nixpkgs, -kernel-build and -kernel-test are required; they pin what jobs evaluate against")
+	}
+	// Half-configured fuzzing is worse than none: the rig would advertise the
+	// kind in /v1/status and then fail every job somebody sent it.
+	if *kernelFuzz != "" && *syzkallerPkg == "" {
+		log.Fatal("-syzkaller is required alongside -kernel-fuzz; it is the fuzzer the runs are built against")
 	}
 	if *mirrorPath == "" {
 		*mirrorPath = filepath.Join(*state, "linux.git")
@@ -65,8 +84,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("opening the job store: %v", err)
 	}
+	limits := Limits{
+		FuzzEnabled:     *kernelFuzz != "",
+		MaxFuzzDuration: *maxFuzzDuration,
+		AllowedDevices:  splitList(*fuzzDevices),
+		VMCPU:           *fuzzVMCPU,
+		VMMemoryMB:      *fuzzVMMemory,
+		HostReserveMB:   *fuzzReserveMB,
+		HostReserveCPU:  *fuzzReserveCPU,
+	}
+
 	mirror := NewMirror(*mirrorPath, *remote)
-	runner := NewRunner(store, mirror, *nixpkgs, *kernelBuild, *kernelTest, *capacity)
+	runner := NewRunner(store, mirror, RunnerConfig{
+		Nixpkgs:      *nixpkgs,
+		KernelBuild:  *kernelBuild,
+		KernelTest:   *kernelTest,
+		KernelFuzz:   *kernelFuzz,
+		SyzkallerPkg: *syzkallerPkg,
+		StateDir:     *state,
+		Capacity:     *capacity,
+		FuzzCapacity: *fuzzCapacity,
+		Limits:       limits,
+	})
 	runner.Start()
 
 	// A rig reboots for its nightly upgrade, and a build that was running is
@@ -78,7 +117,13 @@ func main() {
 		runner.Submit(id)
 	}
 
-	srv := &server{store: store, runner: runner, mirror: mirror}
+	srv := &server{
+		store:      store,
+		runner:     runner,
+		mirror:     mirror,
+		limits:     limits,
+		profileDir: runner.profileDir(),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/jobs", srv.submit)
@@ -89,6 +134,9 @@ func main() {
 	mux.HandleFunc("GET /v1/jobs/{id}/artifacts", srv.manifest)
 	mux.HandleFunc("GET /v1/jobs/{id}/artifacts/{path...}", srv.artifact)
 	mux.HandleFunc("GET /v1/jobs/{id}/bundle.tar.gz", srv.bundle)
+	// Answered while the run is still going, which is the point of it.
+	mux.HandleFunc("GET /v1/jobs/{id}/crashes", srv.crashes)
+	mux.HandleFunc("GET /v1/fuzz/profiles", srv.fuzzProfiles)
 	mux.HandleFunc("GET /v1/status", srv.status)
 
 	ln, err := listener(*listen)
@@ -151,6 +199,13 @@ type server struct {
 	store  *Store
 	runner *Runner
 	mirror *Mirror
+
+	// This rig's policy on what a job may ask for. Carried on the server
+	// rather than read from globals so that the validation is testable and so
+	// that two rigs of different sizes can disagree about it.
+	limits Limits
+	// Where the curated focus profiles are, inside the kernel-fuzz store path.
+	profileDir string
 }
 
 func writeJSON(w http.ResponseWriter, code int, value any) {
@@ -173,7 +228,20 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "malformed job: "+err.Error())
 		return
 	}
-	if err := spec.validate(); err != nil {
+	// A named profile is folded in before validation, so that what gets
+	// validated, stored and rendered is the whole request — and so that
+	// GET /v1/jobs/{id} shows what actually ran rather than a name the reader
+	// would have to go and look up.
+	if spec.Fuzz != nil && spec.Fuzz.Profile != "" {
+		profile, err := loadProfile(s.profileDir, spec.Fuzz.Profile)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		spec.Fuzz.merge(profile)
+	}
+
+	if err := spec.validate(s.limits); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -310,15 +378,70 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 // resultDir resolves a job's output, or reports why there is not one yet.
+//
+// Artifacts rather than StorePath, and the difference is a fuzz job. A build
+// answers with a store path once, at the end. A fuzz run writes into a
+// directory of its own for hours, and its crashes and reproducers are worth
+// fetching long before it finishes — so Artifacts is set when the run starts
+// and this serves out of it while the job is still running.
 func (s *server) resultDir(id string) (string, int, string) {
 	job, ok := s.store.Get(id)
 	if !ok {
 		return "", http.StatusNotFound, "no such job"
 	}
-	if job.StorePath == "" {
+	dir := job.Artifacts
+	if dir == "" {
+		// A job finished by an earlier version of this daemon, which recorded
+		// only the store path. Falling back rather than 409-ing keeps every
+		// job already on a rig readable across the upgrade that adds fuzzing.
+		dir = job.StorePath
+	}
+	if dir == "" {
 		return "", http.StatusConflict, "job has produced no artifacts (state: " + string(job.State) + ")"
 	}
-	return job.StorePath, 0, ""
+	return dir, 0, ""
+}
+
+// crashes lists what a fuzz run has found so far.
+//
+// Read from the workdir on every request rather than from the job record: the
+// run writes them as it finds them, and a client polling this during a
+// four-hour campaign is the expected use.
+func (s *server) crashes(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.store.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such job")
+		return
+	}
+	if job.Spec.Kind != KindFuzz {
+		writeError(w, http.StatusConflict, "only fuzz jobs have crashes; this is a "+string(job.Spec.Kind)+" job")
+		return
+	}
+	if job.Artifacts == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"crashes": []Crash{}})
+		return
+	}
+
+	found := readCrashes(job.Artifacts)
+	if found == nil {
+		found = []Crash{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"crashes": found})
+}
+
+// fuzzProfiles lists the curated campaigns this rig ships, so a client can
+// discover them rather than having to read the repository.
+func (s *server) fuzzProfiles(w http.ResponseWriter, r *http.Request) {
+	if !s.limits.FuzzEnabled {
+		writeError(w, http.StatusNotFound, "this rig does not run fuzz jobs")
+		return
+	}
+	profiles := listProfiles(s.profileDir)
+	if profiles == nil {
+		profiles = []*FuzzProfile{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": profiles})
 }
 
 // manifest serves the artifact list with sizes and hashes. It comes straight
@@ -456,4 +579,16 @@ func (s *server) bundle(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, collectStatus(s.runner, s.mirror))
+}
+
+// splitList parses a comma-separated flag, dropping empties so that a trailing
+// comma or an empty value means "none" rather than a list containing "".
+func splitList(raw string) []string {
+	var out []string
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

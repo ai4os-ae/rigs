@@ -132,22 +132,34 @@ func buildJobs(buildd string) string {
 	var status struct {
 		QueueDepth int      `json:"queue_depth"`
 		Running    []string `json:"running"`
+		// Fuzz runs are counted rather than listed, and are derived rather
+		// than reported directly: `running` already contains them, so
+		// separating the two is what stops a four-hour campaign showing up as
+		// a build that will be finished shortly.
+		FuzzSlotsFree int `json:"fuzz_slots_free"`
+		FuzzCapacity  int `json:"fuzz_capacity"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&status); err != nil {
 		return "unavailable"
 	}
 
-	running := len(status.Running)
-	switch {
-	case running == 0 && status.QueueDepth == 0:
-		return "idle"
-	case status.QueueDepth == 0:
-		return fmt.Sprintf("%d building", running)
-	case running == 0:
-		return fmt.Sprintf("%d queued", status.QueueDepth)
-	default:
-		return fmt.Sprintf("%d building · %d queued", running, status.QueueDepth)
+	fuzzing := max(status.FuzzCapacity-status.FuzzSlotsFree, 0)
+	building := max(len(status.Running)-fuzzing, 0)
+
+	var parts []string
+	if building > 0 {
+		parts = append(parts, fmt.Sprintf("%d building", building))
 	}
+	if fuzzing > 0 {
+		parts = append(parts, fmt.Sprintf("%d fuzzing", fuzzing))
+	}
+	if status.QueueDepth > 0 {
+		parts = append(parts, fmt.Sprintf("%d queued", status.QueueDepth))
+	}
+	if len(parts) == 0 {
+		return "idle"
+	}
+	return strings.Join(parts, " · ")
 }
 
 // uptime reads /proc/uptime rather than shelling out to `uptime`, whose output

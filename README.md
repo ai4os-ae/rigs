@@ -476,6 +476,155 @@ That `result` link is load-bearing. It is what stops the nightly garbage
 collection removing a finished job's artifacts before anybody fetched them, so
 deleting a job is what releases its disk space.
 
+## Fuzz jobs
+
+A kernel that boots and passes its tests is a kernel nobody has attacked yet.
+`kind: fuzz` runs [syzkaller](https://github.com/google/syzkaller) against one
+for a few hours and hands back whatever it broke.
+
+```
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "fuzz",
+  "kernel": { "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449" },
+  "fuzz":   { "duration_seconds": 14400 }
+}'
+```
+
+Enable it per rig with `rigs.buildd.fuzz.enable`; it is off by default, because
+unlike a build or a test the VMs are started by the daemon itself rather than
+inside a Nix sandbox, so the unit needs `/dev/kvm` of its own. Check `kinds` in
+`/v1/status` rather than assuming.
+
+**This is the one kind that is not a derivation, and the API says so.** A build
+and a test are pure functions of their inputs, so the store answers the second
+identical request without doing the work. A fuzzing run is a long-lived process
+whose findings depend on how long it ran and how lucky it was. So only its
+*inputs* are built by Nix — the kernel, the guest image and the fuzzer,
+gathered by `nix/kernel-fuzz` into one store path — and the run itself is a
+child process the daemon supervises against a deadline.
+
+The kernel is built the same way every other kernel here is, with syzkaller's
+requirements forced into the configuration: `KCOV` and `KCOV_INSTRUMENT_ALL`
+for coverage feedback, real DWARF for symbolising it, `KASAN` by default, and
+the handful of symbols without which the VM will not boot or crash detection
+goes blind. `nix/kernel-fuzz/config.nix` has the list and the reason for each.
+Two consequences worth knowing: a fuzz kernel shares no build with a `build` or
+`test` job against the same commit, and KASAN roughly doubles the build.
+
+### Directed fuzzing
+
+`fuzz.focus` weights how often the fuzzer picks programs that cover a region:
+
+```
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "fuzz",
+  "kernel": { "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449" },
+  "fuzz": {
+    "duration_seconds": 14400,
+    "focus": [
+      { "name": "e1000",
+        "files": ["drivers/net/ethernet/intel/e1000/"], "weight": 10.0 },
+      { "name": "netdev-core",
+        "files": ["net/ethtool/", "net/core/dev_ioctl.c"], "weight": 3.0 }
+    ]
+  }
+}'
+```
+
+Weights are relative to `background_weight`, which covers everything the
+filters do not and defaults to `1.0`. **You cannot write that entry yourself,
+and that is deliberate.** syzkaller's own configuration format requires it, and
+a `focus_areas` list without it makes the fuzzer *ignore* every part of the
+kernel outside the filters rather than merely deprioritise it — silently, with
+the run continuing to look healthy. The daemon always appends it. Set
+`background_weight` to `0` if you genuinely mean "only this".
+
+A filter that matches nothing is rejected before the kernel is built, by
+checking it against the tree in the mirror. syzkaller performs the real check
+at startup and refuses to run; this one just does it half an hour earlier.
+
+### The part that is not weighting
+
+Some targets are not reachable at all, and no weight will fix it. The e1000
+driver is the worked example, and `nix/kernel-fuzz/focus/e1000.json` is the
+profile for it: the VM's only e1000 is `eth0`, which the descriptions exclude
+because it is the SSH lifeline, and which stays in the init network namespace
+when the executor unshares `CLONE_NEWNET`. The way in is syzkaller's NIC-VF
+pass-through, which needs no real hardware — just a second emulated NIC parked
+at PCI `0000:00:11.0`, which the executor then moves into the fuzzing namespace
+and renames `nicvf0`.
+
+That is what a profile is for: everything a campaign needs beyond weights,
+reviewed in git rather than retyped into a request.
+
+```
+curl -s http://laptop-01:9000/v1/fuzz/profiles
+curl -sX POST http://laptop-01:9000/v1/jobs -d '{
+  "kind": "fuzz",
+  "kernel": { "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449" },
+  "fuzz":   { "profile": "e1000", "duration_seconds": 14400 }
+}'
+```
+
+Anything inline merges over the profile, focus areas by name — so "the e1000
+profile, but lean on the driver harder" is two lines rather than a copy.
+
+Extra devices are named as `fuzz.vm.devices` from a rig-configured allow-list
+(`rigs.buildd.fuzz.allowedDevices`) rather than as raw QEMU arguments. Raw
+`qemu_args` would turn "submit a patch to be fuzzed" into "run QEMU on this rig
+with my argv", which `-fsdev local,path=/` makes short work of. Their PCI
+address must be `0x10` or above: syzkaller appends its own NIC afterwards, so a
+device at a low slot is enumerated first, takes `eth0`, and leaves every VM
+unreachable.
+
+### Watching one, and what comes out
+
+A four-hour job that says nothing until it finishes is a job nobody trusts.
+
+```
+curl -sN 'http://laptop-01:9000/v1/jobs/{id}/log?follow=1'   # the fuzzer, live
+curl -s   'http://laptop-01:9000/v1/jobs/{id}' | jq .fuzz     # counters
+curl -s   'http://laptop-01:9000/v1/jobs/{id}/crashes'
+curl -s   'http://laptop-01:9000/v1/jobs/{id}/artifacts/crashes/<id>/repro.cprog'
+```
+
+The artifact endpoints answer **while the run is going**, unlike a build's — so
+a reproducer can be pulled out of a campaign that has four hours left on it.
+
+`fuzz.focus_corpus` is the field to read on a directed run. It is the corpus
+size per focus area, and an area sitting at zero while the total climbs means
+the fuzzer cannot reach that code at all — a different problem from weighting
+it too low, and not otherwise visible.
+
+**A crash means `passed: false`.** This reads backwards from what you wanted,
+and it is the same rule as everywhere else here: `passed` describes the kernel,
+not whether you got the result you were hoping for. The job did exactly what
+was asked; the kernel did not survive it. `state: failed` still means the rig
+broke.
+
+### The corpus
+
+syzkaller's corpus — the programs that reached somewhere interesting — is worth
+more than any one run. A rig keeps one per campaign under
+`/var/lib/rig/buildd/fuzz-corpus/`, seeds each run from it and writes it back,
+so a bounded four-hour job is not four hours of rediscovery. It is keyed on the
+focus areas and syscall filters, **not** on the kernel: programs stay useful
+across rebuilds, which is how a corpus is actually used. `"corpus": "cold"`
+opts out.
+
+### The guest
+
+The VM's userspace is an initramfs built by `nix/kernel-fuzz/guest.nix` —
+busybox and sshd, about 45MB — rather than the Debian image syzkaller's own
+`create-image.sh` produces with debootstrap. That script needs root and a
+network and can never be a derivation, which makes it the wrong shape for a
+machine nobody walks up to. The trade is real: an initramfs guest reaches less
+of the syscall surface than a distribution on an emulated disk, because some
+descriptions want a real block device or a normal filesystem layout. What it
+buys is a guest that is cached, identical on every rig, rebuilt when the
+kernel's modules change, and pristine on every one of the many hundreds of
+boots a run performs.
+
 ## The fleet broker
 
 Talking to a rig directly is fine while there is one rig and a person choosing

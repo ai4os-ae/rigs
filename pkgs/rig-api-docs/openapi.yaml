@@ -8,10 +8,15 @@ info:
     Submit a kernel commit, an optional patch and a configuration; a rig builds
     it and hands back the artifacts, the logs and a report.
 
-    ### Two kinds of job
+    ### Three kinds of job
 
     `kind: build` compiles a kernel. `kind: test` boots one in a QEMU virtual
-    machine, runs something in it, and tears it down.
+    machine, runs something in it, and tears it down. `kind: fuzz` runs
+    syzkaller against one for a few hours and reports what it broke.
+
+    Not every rig runs every kind: fuzzing is enabled per rig, because its
+    virtual machines are started by the daemon rather than inside a build
+    sandbox. Read `kinds` from `/v1/rigs` rather than assuming.
 
     A test either describes the kernel it wants, exactly as a build job does —
     in which case the build comes out of the store if that rig has already done
@@ -37,6 +42,25 @@ info:
     have learned nothing about your patch.
 
     **So branch on `passed`, never on `state`.**
+
+    For a fuzz job this reads backwards from what you wanted, and it is the
+    same rule: crashes found means `passed: false`. The job did exactly what
+    was asked and the kernel did not survive it. A run that reached its
+    deadline without a crash is `passed: true`.
+
+    ### Fuzzing is the one kind that is not cached
+
+    A build and a test are pure functions of their inputs, so an identical
+    request is answered from the store. A fuzzing run is not: what it finds
+    depends on how long it ran and how lucky it was. Only its inputs are built
+    that way — the kernel, the guest image and the fuzzer — and the run itself
+    is a supervised process with a deadline.
+
+    Two things follow. Its artifacts are readable *while it runs*, unlike a
+    build's, so a reproducer can be fetched from a campaign that is still
+    going. And its kernel shares no build with a `build` or `test` job against
+    the same commit, because fuzzing forces `KCOV`, `KASAN` and debug info into
+    the configuration.
 
     ### Why the second build is fast
 
@@ -358,6 +382,60 @@ paths:
         "409":
           description: The job has produced no artifacts yet.
 
+  /v1/jobs/{id}/crashes:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      summary: What a fuzz run has found
+      description: |
+        Fuzz jobs only. Answered **while the run is going**, which is the point
+        of it: a campaign with four hours left on it can still hand you a
+        reproducer now.
+
+        Fetch the reproducer itself from
+        `/v1/jobs/{id}/artifacts/{path}/repro.cprog`, using the `path` on each
+        crash.
+      responses:
+        "200":
+          description: The crashes so far, most frequently hit first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  crashes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Crash" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not a fuzz job.
+
+  /v1/fuzz/profiles:
+    get:
+      tags: [jobs]
+      summary: Curated fuzzing campaigns this rig ships
+      description: |
+        A profile is everything a campaign needs beyond weights — the devices
+        that make a target reachable at all, and the configuration symbols that
+        go with them — reviewed in git rather than retyped into a request. Name
+        one as `fuzz.profile`; anything you send inline merges over it.
+      responses:
+        "200":
+          description: The profiles available.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profiles:
+                    type: array
+                    items: { $ref: "#/components/schemas/FuzzProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: This rig does not run fuzz jobs.
+
   /v1/rigs:
     get:
       tags: [fleet]
@@ -458,15 +536,18 @@ components:
         kind:
           type: string
           default: build
-          enum: [build, test]
+          enum: [build, test, fuzz]
           description: |
             `build` compiles a kernel; `test` boots one under QEMU and runs
-            something in it. Fuzz runs will appear here. Read `kinds` from
-            `/v1/rigs` rather than assuming a rig supports one.
+            something in it; `fuzz` runs syzkaller against one for a few hours.
+            Not every rig runs every kind — fuzzing has to be enabled per rig —
+            so read `kinds` from `/v1/rigs` rather than assuming.
+        fuzz:
+          $ref: "#/components/schemas/FuzzRequest"
         from:
           type: string
           description: |
-            Test jobs only. The id of a finished build job whose kernel to
+            Test and fuzz jobs only. The id of a finished build job whose kernel to
             boot, exactly as it was returned — `<rig>.<id>`. The rig named in
             it is where the test runs, because that is where the kernel is; a
             `rig` that disagrees with it fails with `409`.
@@ -534,6 +615,224 @@ components:
             Constrain to rigs of this system, matched against what each rig
             reports. Derived from `arch` when omitted.
           examples: [x86_64-linux]
+
+    FuzzRequest:
+      type: object
+      description: |
+        Fuzz jobs only. How long to run syzkaller for, and what to point it at.
+
+        Everything here is optional: a fuzz job with no `fuzz` block at all is
+        a general, undirected run, which is what syzkaller does best.
+      properties:
+        duration_seconds:
+          type: integer
+          default: 14400
+          description: |
+            How long to fuzz for. A run ends on its own — rigs are unattended
+            and shared with build and test jobs. The rig's ceiling is usually
+            24 hours; a request for more is refused rather than shortened.
+        profile:
+          type: string
+          description: |
+            A curated campaign shipped by the rig, by name. `GET
+            /v1/fuzz/profiles` lists them. Profiles carry what is too subtle to
+            retype into a request — the devices a target needs to be reachable
+            at all, and the configuration symbols that go with them. Anything
+            you send inline merges over it, focus areas by name.
+          examples: [e1000]
+        focus:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/FocusArea" }
+          description: |
+            Weight how often the fuzzer picks programs covering a region of
+            the kernel.
+        background_weight:
+          type: number
+          default: 1.0
+          description: |
+            The weight given to everything the focus areas do not cover, so
+            focus weights read as multiples of "the rest of the kernel".
+
+            You cannot express this as a `focus` entry, and that is deliberate.
+            syzkaller treats a focus list with no unfiltered entry as *ignore
+            everything else* rather than *prefer these* — discarding the
+            general coverage signal, silently, while the run goes on looking
+            healthy. The rig always appends it. Set this to `0` if you really
+            do mean only your filters.
+        enable_syscalls:
+          type: array
+          items: { type: string }
+          description: |
+            Restrict the fuzzer to these. Names are syzkaller's, and are
+            validated by syzkaller rather than here — the set depends on the
+            descriptions it was built with.
+          examples: [["ioctl$sock_SIOCETHTOOL"]]
+        disable_syscalls:
+          type: array
+          items: { type: string }
+        procs:
+          type: integer
+          default: 8
+          description: Parallel test processes inside each VM.
+        reproduce:
+          type: boolean
+          default: true
+          description: |
+            Whether to reduce each crash to a reproducer. A crash without one
+            is a report a maintainer cannot act on.
+        corpus:
+          type: string
+          default: shared
+          description: |
+            `shared` seeds this run from the rig's corpus for this campaign and
+            writes back to it, so a bounded run is not a cold start. `cold`
+            does neither. A job id seeds from that job.
+
+            The shared corpus is keyed on the focus areas and syscall filters,
+            not on the kernel: syzkaller's programs stay useful across
+            rebuilds.
+        modules:
+          type: array
+          items: { type: string }
+          description: |
+            Loaded in the guest before the fuzzer starts, for a driver under
+            test configured `=m`. A driver that was never loaded is a focus
+            area that reports no coverage for a reason nothing else explains.
+        vm:
+          type: object
+          properties:
+            count: { type: integer }
+            cpu: { type: integer }
+            memory_mb:
+              type: integer
+              default: 3072
+              description: |
+                Not a tuning knob below about 3072. `syz-executor` maps its
+                data segment at a fixed address and that mapping fails against
+                a KASAN kernel on a smaller guest: the VM dies with `SYZFAIL:
+                mmap of data segment failed`, reboots, and dies again. Nothing
+                reports an error — the pool looks healthy and the execution
+                rate stays at zero.
+            devices:
+              type: array
+              maxItems: 4
+              items: { $ref: "#/components/schemas/FuzzDevice" }
+          description: |
+            The VM pool. A rig caps the count against its own cores and memory
+            and will not be talked above it — overcommitting does not fail, it
+            thrashes — so ask for fewer, not more.
+
+    FocusArea:
+      type: object
+      required: [name, weight]
+      properties:
+        name:
+          type: string
+          description: |
+            Labels this area's statistics, which is the only way to tell
+            whether it is being reached at all. See `focus_corpus` on the job.
+          examples: [e1000]
+        files:
+          type: array
+          items: { type: string }
+          description: |
+            Regular expressions over kernel source paths. A filter matching
+            nothing is rejected before the kernel is built.
+          examples: [["drivers/net/ethernet/intel/e1000/"]]
+        functions:
+          type: array
+          items: { type: string }
+        weight:
+          type: number
+          description: Relative to `background_weight`. Must be above zero.
+          examples: [10.0]
+
+    FuzzDevice:
+      type: object
+      description: |
+        An emulated device to give each VM, from the rig's allow-list.
+
+        This is here instead of syzkaller's raw `qemu_args`, which would turn
+        "submit a patch to be fuzzed" into "run QEMU on this rig with my argv".
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: A QEMU device type the rig allows.
+          examples: [e1000]
+        addr:
+          type: string
+          description: |
+            PCI address, `0x10` or above. syzkaller appends its own NIC after
+            these, so a device at a low slot is enumerated first and takes
+            `eth0` — which leaves the VM unreachable and every boot reported as
+            a failure.
+          examples: ["0x11"]
+        netdev:
+          type: string
+          enum: [none, user-restricted]
+          default: none
+
+    FuzzResult:
+      type: object
+      description: Live counters for a fuzz job, updated while it runs.
+      properties:
+        corpus: { type: integer }
+        coverage: { type: integer }
+        executed: { type: integer }
+        exec_per_sec: { type: integer }
+        crashes: { type: integer }
+        reproducing: { type: integer }
+        focus_corpus:
+          type: object
+          additionalProperties: { type: integer }
+          description: |
+            Corpus size per focus area, and the field to read on a directed
+            run. An area at zero while the total climbs means the fuzzer cannot
+            reach that code at all — a different problem from weighting it too
+            low, and not otherwise visible.
+        elapsed_seconds: { type: integer }
+        duration_seconds: { type: integer }
+
+    Crash:
+      type: object
+      properties:
+        id: { type: string }
+        title:
+          type: string
+          examples: ["KASAN: slab-use-after-free Read in e1000_probe"]
+        count:
+          type: integer
+          description: Times it was hit. One may be a fluke.
+        repro:
+          type: boolean
+          description: A syzkaller program reproducing it exists.
+        crepro:
+          type: boolean
+          description: |
+            A C program does — this is the form a maintainer wants, and the one
+            to attach to a report.
+        path:
+          type: string
+          description: |
+            Where it is under `/v1/jobs/{id}/artifacts/`, fetchable while the
+            run is still going.
+          examples: [crashes/a1b2c3d4]
+
+    FuzzProfile:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        focus:
+          type: array
+          items: { $ref: "#/components/schemas/FocusArea" }
+        procs: { type: integer }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        vm: { type: object }
 
     TestRequest:
       type: object
@@ -696,6 +995,8 @@ components:
         error:
           type: string
           description: "Set when `state` is `failed`: why the rig could not answer."
+        fuzz:
+          $ref: "#/components/schemas/FuzzResult"
         kernel_release:
           type: string
           examples: ["6.17.0"]
@@ -747,6 +1048,15 @@ components:
           type: array
           items: { type: string }
           description: Job kinds this rig implements.
+        fuzz_slots_free:
+          type: integer
+          description: |
+            Fuzz runs this rig could start right now. Reported separately
+            because `queue_depth` does not describe fuzzing: a run holds its
+            slot for hours, so a rig with an empty queue and its only slot
+            mid-campaign is the least available rig in the fleet.
+        fuzz_capacity:
+          type: integer
         checked_at:
           type: string
           format: date-time

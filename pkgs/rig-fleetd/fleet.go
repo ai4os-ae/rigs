@@ -43,12 +43,31 @@ type MemberStatus struct {
 	StoreFreeBytes uint64    `json:"store_free_bytes,omitempty"`
 	Kinds          []string  `json:"kinds,omitempty"`
 	CheckedAt      time.Time `json:"checked_at"`
+
+	// Fuzzing is counted separately because queue depth does not describe it.
+	// A fuzz run holds its slot for hours by design, so a rig with an empty
+	// queue and its only slot four hours into a campaign is the *least*
+	// available rig in the fleet while looking like the most.
+	FuzzSlotsFree int `json:"fuzz_slots_free"`
+	FuzzCapacity  int `json:"fuzz_capacity"`
 }
 
 // pending is how loaded a rig is for placement purposes: work already accepted
 // but not finished. Load average is not used — it lags by a minute, which is
 // most of a patched build.
 func (m *MemberStatus) pending() int { return m.QueueDepth + m.Running }
+
+// canFuzzNow reports whether a fuzz job placed here would start rather than
+// wait out somebody else's campaign.
+//
+// A rig that has not said — an older one — is taken at its word that it runs
+// the kind, on the same principle as `runs`: assume the fleet still works.
+func (m *MemberStatus) canFuzzNow() bool {
+	if m.FuzzCapacity == 0 {
+		return true
+	}
+	return m.FuzzSlotsFree > 0
+}
 
 // runs reports whether this rig implements a kind of job.
 //
@@ -140,6 +159,8 @@ func (f *Fleet) check(ctx context.Context, m Member) {
 					Load           []float64 `json:"load"`
 					StoreFreeBytes uint64    `json:"store_free_bytes"`
 					Kinds          []string  `json:"kinds"`
+					FuzzSlotsFree  int       `json:"fuzz_slots_free"`
+					FuzzCapacity   int       `json:"fuzz_capacity"`
 				}
 				if err = json.NewDecoder(resp.Body).Decode(&s); err == nil {
 					next.Up = true
@@ -150,6 +171,8 @@ func (f *Fleet) check(ctx context.Context, m Member) {
 					next.Load = s.Load
 					next.StoreFreeBytes = s.StoreFreeBytes
 					next.Kinds = s.Kinds
+					next.FuzzSlotsFree = s.FuzzSlotsFree
+					next.FuzzCapacity = s.FuzzCapacity
 				}
 			}
 		}
@@ -227,9 +250,19 @@ func (f *Fleet) Pick(system, pin, kind, affinityKey string) (Member, error) {
 		if !s.runs(kind) {
 			continue
 		}
+		// A rig mid-campaign would accept the job and then sit on it for
+		// hours. Queue depth says nothing about that, so it is asked directly.
+		if kind == "fuzz" && !s.canFuzzNow() {
+			continue
+		}
 		candidates = append(candidates, s)
 	}
 	if len(candidates) == 0 {
+		if kind == "fuzz" {
+			return Member{}, fmt.Errorf(
+				"no reachable rig on %s has a free fuzz slot; a fuzzing run holds one for hours, "+
+					"so this usually means waiting rather than a fleet problem", system)
+		}
 		return Member{}, fmt.Errorf("no reachable rig runs %s jobs on %s", kind, system)
 	}
 

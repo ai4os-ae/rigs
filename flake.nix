@@ -100,6 +100,13 @@
                 # The fleet broker: one endpoint in front of every rig.
                 packages.rig-fleetd = pkgs.callPackage ./pkgs/rig-fleetd/package.nix { };
 
+                # syzkaller, pinned to an upstream commit rather than taken
+                # from nixpkgs — whose copy is stuck on a January 2024
+                # revision, and syscall descriptions are exactly what a
+                # fuzzer's reach is made of. Exposed so it can be built and
+                # bumped on its own: `nix build .#syzkaller`.
+                packages.syzkaller = pkgs.callPackage ./pkgs/syzkaller/package.nix { };
+
                 # The browsable API documentation. A directory, meant to be an
                 # nginx root — `nix build .#rig-api-docs` then point a browser
                 # at result/index.html to read it without deploying anything.

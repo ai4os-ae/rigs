@@ -16,14 +16,21 @@ import (
 // Kind tags what a job asks for. A build compiles a kernel; a test boots one
 // in a virtual machine and runs something in it. Both are pure functions of
 // their inputs and are answered by a derivation, which is why they share this
-// envelope, this queue and this state machine. A fuzz run would not — it is a
-// long-lived process with a corpus that has to survive it — and that is the
-// reason this is a tagged envelope rather than an assumption.
+// envelope, this queue and this state machine.
+//
+// A fuzz run is not one of those, which is what the tagged envelope was for.
+// It is a long-lived process with a corpus that has to survive it, so only its
+// *inputs* are a derivation — the kernel, the guest image and the fuzzer, all
+// gathered by nix/kernel-fuzz — and the run itself is a child process the
+// daemon supervises against a deadline. It shares the envelope, the store and
+// every endpoint; it does not share the queue, because a four-hour run must
+// not sit in front of somebody's ten-minute build. See fuzzrunner.go.
 type Kind string
 
 const (
 	KindBuild Kind = "build"
 	KindTest  Kind = "test"
+	KindFuzz  Kind = "fuzz"
 )
 
 // State is what happened to the job, which is not the same question as whether
@@ -126,6 +133,7 @@ type Spec struct {
 	From string `json:"from,omitempty"`
 
 	Test *TestSpec `json:"test,omitempty"`
+	Fuzz *FuzzSpec `json:"fuzz,omitempty"`
 }
 
 type Job struct {
@@ -135,8 +143,23 @@ type Job struct {
 
 	// Set when State is Failed: why the infrastructure could not answer.
 	Error string `json:"error,omitempty"`
-	// The realised store path, once there is one.
+	// The realised store path, once there is one. Build and test jobs answer
+	// with one; a fuzz run's output is not in the store, so for those this
+	// names the environment the run used rather than its results.
 	StorePath string `json:"store_path,omitempty"`
+	// Where this job's artifacts are, which for a build or a test is also
+	// StorePath and for a fuzz run is not — a run writes into its own
+	// directory for hours, and nothing written to for hours can be in the
+	// store.
+	//
+	// Set as soon as a fuzz run starts rather than when it ends, which is what
+	// lets the artifact endpoints serve a reproducer out of a job that is
+	// still going. Persisted, not merely held in memory: a rig reboots for its
+	// nightly upgrade, and a finished job whose artifacts became unreachable
+	// across that reboot would be a job somebody has to re-run.
+	Artifacts string `json:"artifacts_path,omitempty"`
+	// Live counters for a fuzz job. Nil for anything else.
+	Fuzz *FuzzProgress `json:"fuzz,omitempty"`
 	// Lifted out of the build's own report.json so that listing jobs does not
 	// mean reading a file per job out of the store.
 	Passed        *bool  `json:"passed,omitempty"`
@@ -182,21 +205,30 @@ const (
 // validate rejects a spec before it can reach the queue. Everything here is
 // something the caller can fix, so it is worth a clear 400 rather than a build
 // that fails half an hour later.
-func (s *Spec) validate() error {
+func (s *Spec) validate(lim Limits) error {
 	if s.Kind == "" {
 		s.Kind = KindBuild
 	}
-	if s.Kind != KindBuild && s.Kind != KindTest {
-		return fmt.Errorf("unsupported kind %q; this rig implements %q and %q", s.Kind, KindBuild, KindTest)
+	switch s.Kind {
+	case KindBuild, KindTest, KindFuzz:
+	default:
+		return fmt.Errorf("unsupported kind %q; this rig implements %q, %q and %q",
+			s.Kind, KindBuild, KindTest, KindFuzz)
 	}
 
 	if s.Kind == KindBuild {
 		if s.From != "" {
-			return fmt.Errorf("from is for test jobs; a build job describes the kernel it builds")
+			return fmt.Errorf("from is for test and fuzz jobs; a build job describes the kernel it builds")
 		}
 		if s.Test != nil {
 			return fmt.Errorf("test is for test jobs; set kind to %q", KindTest)
 		}
+	}
+	if s.Kind != KindTest && s.Test != nil {
+		return fmt.Errorf("test is for test jobs; set kind to %q", KindTest)
+	}
+	if s.Kind != KindFuzz && s.Fuzz != nil {
+		return fmt.Errorf("fuzz is for fuzz jobs; set kind to %q", KindFuzz)
 	}
 
 	// A test either names the kernel it wants or describes one, and doing both
@@ -244,6 +276,18 @@ func (s *Spec) validate() error {
 			s.Test = &TestSpec{}
 		}
 		if err := s.Test.validate(); err != nil {
+			return err
+		}
+	}
+
+	if s.Kind == KindFuzz {
+		if s.Fuzz == nil {
+			// A fuzz job with no instructions is a general, undirected run,
+			// which is a perfectly good thing to ask for and is what syzkaller
+			// does best. The defaults are in FuzzSpec.validate.
+			s.Fuzz = &FuzzSpec{}
+		}
+		if err := s.Fuzz.validate(lim); err != nil {
 			return err
 		}
 	}

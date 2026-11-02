@@ -14,10 +14,35 @@ import (
 	"time"
 )
 
+// RunnerConfig is everything the NixOS module pins about how work runs here.
+//
+// Store paths rather than NIX_PATH lookups: what a rig builds against is a
+// property of its configuration and not of whatever channel happens to be
+// registered on the machine.
+type RunnerConfig struct {
+	Nixpkgs     string
+	KernelBuild string
+	KernelTest  string
+	// Both empty when this rig does not run fuzz jobs. SyzkallerPkg is the
+	// package *expression*, like the others here, rather than a built
+	// syzkaller: it lives under pkgs/ and so cannot be reached by a relative
+	// path from inside the nix/ directory the module copies in one piece.
+	KernelFuzz   string
+	SyzkallerPkg string
+
+	// Where the daemon keeps state that outlives a job: the fuzzing SSH key
+	// and the shared corpora.
+	StateDir string
+
+	Capacity     int
+	FuzzCapacity int
+
+	Limits Limits
+}
+
 // Runner is the queue. One goroutine per concurrency slot takes job ids off a
-// channel and builds them; a rig has twelve threads and a kernel build wants
-// all of them, so the default slot count is one and raising it is usually
-// wrong.
+// channel and runs them; a rig has twelve threads and a kernel build wants all
+// of them, so the default slot count is one and raising it is usually wrong.
 //
 // Nix is the build backend but not the interface: everything a caller sees is
 // the HTTP API, and swapping what happens in `build` below would not change it.
@@ -26,54 +51,85 @@ import (
 // the second is answered from the store — and that a patched build reuses the
 // expensive unpatched base it shares with every other patch against that
 // commit.
+//
+// A fuzz job takes the same path as far as its *inputs*, and then diverges: it
+// has no derivation to wait on, only a process to supervise. See fuzzrunner.go.
 type Runner struct {
 	store  *Store
 	mirror *Mirror
-
-	// Store paths, injected by the NixOS module. Pinning nixpkgs here rather
-	// than reading NIX_PATH is what keeps a rig's builds reproducible across
-	// whatever the channel happens to be.
-	nixpkgs     string
-	kernelBuild string
-	kernelTest  string
+	cfg    RunnerConfig
 
 	queue chan string
+	// Fuzz jobs get their own queue, and it is not a tuning decision. A fuzz
+	// run holds a slot for hours by design; sharing the build queue would mean
+	// a ten-minute kernel build waiting behind somebody's overnight campaign.
+	fuzzQueue chan string
 
-	mu       sync.Mutex
-	cancels  map[string]context.CancelFunc
-	running  map[string]bool
-	capacity int
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
+	running map[string]bool
 }
 
-func NewRunner(store *Store, mirror *Mirror, nixpkgs, kernelBuild, kernelTest string, capacity int) *Runner {
+func NewRunner(store *Store, mirror *Mirror, cfg RunnerConfig) *Runner {
 	return &Runner{
-		store:       store,
-		mirror:      mirror,
-		nixpkgs:     nixpkgs,
-		kernelBuild: kernelBuild,
-		kernelTest:  kernelTest,
+		store:  store,
+		mirror: mirror,
+		cfg:    cfg,
 		// Buffered generously: submitting must not block on a busy queue, and
 		// a rig will not hold thousands of pending kernel builds.
-		queue:    make(chan string, 1024),
-		cancels:  map[string]context.CancelFunc{},
-		running:  map[string]bool{},
-		capacity: capacity,
+		queue:     make(chan string, 1024),
+		fuzzQueue: make(chan string, 1024),
+		cancels:   map[string]context.CancelFunc{},
+		running:   map[string]bool{},
 	}
 }
 
 func (r *Runner) Start() {
-	for i := 0; i < r.capacity; i++ {
+	for range r.cfg.Capacity {
 		go func() {
 			for id := range r.queue {
 				r.build(id)
 			}
 		}()
 	}
+	for range r.cfg.FuzzCapacity {
+		go func() {
+			for id := range r.fuzzQueue {
+				r.build(id)
+			}
+		}()
+	}
 }
 
-func (r *Runner) Submit(id string) { r.queue <- id }
+// Submit puts a job on the queue its kind belongs to.
+func (r *Runner) Submit(id string) {
+	if job, ok := r.store.Get(id); ok && job.Spec.Kind == KindFuzz {
+		r.fuzzQueue <- id
+		return
+	}
+	r.queue <- id
+}
 
 func (r *Runner) QueueDepth() int { return len(r.queue) }
+
+func (r *Runner) FuzzQueueDepth() int { return len(r.fuzzQueue) }
+
+// FuzzSlotsFree is what a broker reads to decide whether this rig can take a
+// fuzz job now. Queue depth is the wrong question for a job that runs for
+// hours: a rig with an empty queue and its only slot four hours into a
+// campaign is not available.
+func (r *Runner) FuzzSlotsFree() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	busy := 0
+	for id := range r.running {
+		if job, ok := r.store.Get(id); ok && job.Spec.Kind == KindFuzz {
+			busy++
+		}
+	}
+	return max(r.cfg.FuzzCapacity-busy, 0)
+}
 
 func (r *Runner) Running() []string {
 	r.mu.Lock()
@@ -137,7 +193,20 @@ func (r *Runner) build(id string) {
 	}
 	defer logFile.Close()
 
-	storePath, err := r.run(ctx, job, logFile)
+	// Both paths answer with the directory holding report.json and the
+	// artifacts. For a build or a test that is a store path; for a fuzz run it
+	// is the syzkaller workdir, which is not in the store and could not be —
+	// it was written to for hours.
+	var (
+		resultDir string
+		isStore   bool
+	)
+	if job.Spec.Kind == KindFuzz {
+		resultDir, err = r.runFuzz(ctx, job, logFile)
+	} else {
+		resultDir, err = r.run(ctx, job, logFile)
+		isStore = true
+	}
 
 	finished := time.Now().UTC()
 	switch {
@@ -157,15 +226,20 @@ func (r *Runner) build(id string) {
 		})
 
 	default:
-		// The build ran. Whether the *kernel* compiled is a separate question,
-		// answered by report.json, and a failure there is a result rather than
-		// an error — see the comment on State.
-		passed, release := r.summarise(storePath)
+		// The job ran. Whether the *kernel* compiled, booted or survived being
+		// fuzzed is a separate question, answered by report.json, and a failure
+		// there is a result rather than an error — see the comment on State.
+		passed, release := r.summarise(resultDir)
 		_ = r.store.Update(id, func(j *Job) {
 			j.State = StateSucceeded
-			j.StorePath = storePath
+			if isStore {
+				j.StorePath = resultDir
+			}
+			j.Artifacts = resultDir
 			j.Passed = passed
-			j.KernelRelease = release
+			if release != "" {
+				j.KernelRelease = release
+			}
 			j.FinishedAt = &finished
 		})
 	}
@@ -258,7 +332,7 @@ func (r *Runner) expression(ctx context.Context, job *Job, logFile *os.File) (st
 }
 
 func (r *Runner) buildExpression(ctx context.Context, job *Job, logFile *os.File) (string, error) {
-	kernel, err := r.kernelFromSpec(ctx, job, logFile, "")
+	kernel, err := r.kernelFromSpec(ctx, job, logFile, "", "", job.Spec.Config.Set)
 	if err != nil {
 		return "", err
 	}
@@ -270,7 +344,7 @@ let
   kernelBuild = pkgs.callPackage %s { };
 in
 %s
-`, job.ID, r.nixpkgs, r.kernelBuild, strings.TrimSpace(kernel)), nil
+`, job.ID, r.cfg.Nixpkgs, r.cfg.KernelBuild, strings.TrimSpace(kernel)), nil
 }
 
 // testExpression renders a test job.
@@ -300,7 +374,7 @@ func (r *Runner) testExpression(ctx context.Context, job *Job, logFile *os.File)
 		source = fmt.Sprintf("\n  source = builtins.storePath %s + \"/source\";", ref.Source)
 		name = ref.Name
 	} else {
-		if kernel, err = r.kernelFromSpec(ctx, job, logFile, "  "); err != nil {
+		if kernel, err = r.kernelFromSpec(ctx, job, logFile, "  ", "", job.Spec.Config.Set); err != nil {
 			return "", err
 		}
 		name = "linux-" + job.Spec.Kernel.Commit[:12]
@@ -348,9 +422,9 @@ kernelTest.run {
 }
 `,
 		job.ID,
-		r.nixpkgs,
-		r.kernelBuild,
-		r.kernelTest,
+		r.cfg.Nixpkgs,
+		r.cfg.KernelBuild,
+		r.cfg.KernelTest,
 		name,
 		kernel,
 		source,
@@ -369,7 +443,15 @@ kernelTest.run {
 // describes its kernel, and makes sure the commit is in the mirror first. The
 // indent is the caller's because the same text is a whole expression in a
 // build job and a nested attribute in a test job.
-func (r *Runner) kernelFromSpec(ctx context.Context, job *Job, logFile *os.File, indent string) (string, error) {
+//
+// configWrap is a function to apply to the configuration attrset — empty for
+// build and test jobs, and "kernelFuzz.configSetFor" for a fuzz job, whose
+// symbols are the caller's request with syzkaller's requirements forced over
+// the top of it. configSet is passed in rather than read off the spec because
+// a fuzz job's may have a profile's symbols merged underneath the caller's.
+func (r *Runner) kernelFromSpec(ctx context.Context, job *Job, logFile *os.File,
+	indent, configWrap string, configSet map[string]string) (string, error) {
+
 	if err := r.mirror.Ensure(ctx, job.Spec.Kernel.Commit, job.Spec.Kernel.Remote, logFile); err != nil {
 		return "", err
 	}
@@ -384,13 +466,17 @@ func (r *Runner) kernelFromSpec(ctx context.Context, job *Job, logFile *os.File,
 	}
 
 	var set strings.Builder
-	symbols := make([]string, 0, len(job.Spec.Config.Set))
-	for symbol := range job.Spec.Config.Set {
+	symbols := make([]string, 0, len(configSet))
+	for symbol := range configSet {
 		symbols = append(symbols, symbol)
 	}
 	sort.Strings(symbols)
 	for _, symbol := range symbols {
-		fmt.Fprintf(&set, "%s    %s = %q;\n", indent, symbol, job.Spec.Config.Set[symbol])
+		fmt.Fprintf(&set, "%s    %s = %q;\n", indent, symbol, configSet[symbol])
+	}
+
+	if configWrap != "" {
+		configWrap += " "
 	}
 
 	return fmt.Sprintf(`kernelBuild.build {
@@ -398,7 +484,7 @@ func (r *Runner) kernelFromSpec(ctx context.Context, job *Job, logFile *os.File,
 %[1]s  configBase = %[3]q;
 %[1]s  arch = %[4]q;
 
-%[1]s  configSet = {
+%[1]s  configSet = %[8]s{
 %[5]s%[1]s  };
 
 %[1]s  src = builtins.fetchGit {
@@ -416,6 +502,7 @@ func (r *Runner) kernelFromSpec(ctx context.Context, job *Job, logFile *os.File,
 		set.String(),
 		r.mirror.path,
 		patch,
+		configWrap,
 	), nil
 }
 
@@ -430,6 +517,9 @@ type kernelRef struct {
 	// a store reference. Building selftests needs that tree.
 	Source string
 	Name   string
+	// The commit it was built from. Needed by a fuzz job that named an earlier
+	// build: the focus pre-flight checks its filters against that kernel tree.
+	Commit string
 }
 
 // resolveFrom finds the kernel a `from` test should boot, and refuses the
@@ -460,6 +550,7 @@ func resolveFrom(store *Store, id string) (kernelRef, error) {
 
 	ref := kernelRef{
 		StorePath: job.StorePath,
+		Commit:    job.Spec.Kernel.Commit,
 		// A job with no patch *is* its own base, and its output has the source
 		// tree in it directly.
 		Source: job.StorePath,
