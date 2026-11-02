@@ -296,6 +296,7 @@ func (s *server) submit(w http.ResponseWriter, r *http.Request) {
 		// Only once the rig has actually accepted it: a hint pointing at a rig
 		// that refused the job is worse than no hint.
 		s.fleet.affinity.Set(key, member.Name)
+		s.fleet.Placed(member.Name, kind)
 	}
 	upstream["rig"] = member.Name
 

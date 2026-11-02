@@ -57,6 +57,25 @@ type MemberStatus struct {
 // most of a patched build.
 func (m *MemberStatus) pending() int { return m.QueueDepth + m.Running }
 
+// capacity is how many jobs of a kind the rig runs at once. A rig that has not
+// said is taken to run one, which is what every rig did before it could say.
+func (m *MemberStatus) capacity(kind string) int {
+	c := m.Capacity
+	if kind == "fuzz" && m.FuzzCapacity > 0 {
+		c = m.FuzzCapacity
+	}
+	return max(c, 1)
+}
+
+// hasRoom reports whether a job placed here would start now rather than wait
+// in this rig's queue.
+func (m *MemberStatus) hasRoom(kind string) bool {
+	if kind == "fuzz" {
+		return m.canFuzzNow()
+	}
+	return m.pending() < m.capacity(kind)
+}
+
 // canFuzzNow reports whether a fuzz job placed here would start rather than
 // wait out somebody else's campaign.
 //
@@ -217,7 +236,12 @@ func (f *Fleet) Lookup(name string) (Member, bool) {
 //     already has the expensive unpatched base in its store, which is the
 //     difference between a twenty-second job and a six-minute one, and is by
 //     far the largest lever available here.
-//  3. Otherwise the least busy, and free disk to break ties.
+//  3. Otherwise a rig with a free slot, the largest first; and when every rig
+//     is full, the largest takes the queue. Rigs are not equals — one with
+//     eight slots drains a queue far faster than one with one — so a small rig
+//     takes overflow while it is idle and never accumulates a backlog of its
+//     own while a bigger one is up. Fewer pending jobs, then free disk, break
+//     ties between rigs of one size.
 func (f *Fleet) Pick(system, pin, kind, affinityKey string) (Member, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -268,25 +292,53 @@ func (f *Fleet) Pick(system, pin, kind, affinityKey string) (Member, error) {
 
 	if preferred := f.affinity.Get(affinityKey); preferred != "" {
 		for _, s := range candidates {
-			// Only when it is not already backed up: a warm store is worth a
-			// lot, but not worth queueing behind several other builds when
-			// another rig is idle.
-			if s.Name == preferred && s.pending() <= 1 {
+			// Only when it would start there: a warm store is worth a lot, but
+			// not worth queueing behind other builds, least of all on a rig
+			// that runs one at a time.
+			if s.Name == preferred && s.hasRoom(kind) {
 				return s.Member, nil
 			}
 		}
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].pending() != candidates[j].pending() {
-			return candidates[i].pending() < candidates[j].pending()
+		a, b := candidates[i], candidates[j]
+		if a.hasRoom(kind) != b.hasRoom(kind) {
+			return a.hasRoom(kind)
 		}
-		if candidates[i].StoreFreeBytes != candidates[j].StoreFreeBytes {
-			return candidates[i].StoreFreeBytes > candidates[j].StoreFreeBytes
+		if a.capacity(kind) != b.capacity(kind) {
+			return a.capacity(kind) > b.capacity(kind)
 		}
-		return candidates[i].Name < candidates[j].Name
+		if a.pending() != b.pending() {
+			return a.pending() < b.pending()
+		}
+		if a.StoreFreeBytes != b.StoreFreeBytes {
+			return a.StoreFreeBytes > b.StoreFreeBytes
+		}
+		return a.Name < b.Name
 	})
 	return candidates[0].Member, nil
+}
+
+// Placed counts a job a rig has just accepted against it, until the next poll
+// reports the rig's own figure. Without it every job in a burst is placed
+// against the same stale status and lands on the same rig, which for a run of
+// submissions inside one poll interval is all of them.
+func (f *Fleet) Placed(name, kind string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	s, ok := f.status[name]
+	if !ok {
+		return
+	}
+	next := *s
+	if kind == "fuzz" && next.FuzzCapacity > 0 {
+		next.FuzzSlotsFree--
+	} else {
+		next.QueueDepth++
+	}
+	f.status[name] = &next
 }
 
 // Affinity remembers which rig last built a given (commit, configuration), so
