@@ -151,12 +151,37 @@ in
 
     buildd = mkOption {
       description = ''
-        Base URL of this rig's build daemon, for the jobs line on the page.
-        Set for you when `rigs.buildd` is enabled; empty leaves the line off
-        entirely rather than showing a row that never says anything.
+        Base URL of this rig's build daemon, for its panel on the job board.
+        Set for you when `rigs.buildd` is enabled; empty leaves this rig off
+        the board.
       '';
       type = types.str;
       default = "";
+    };
+
+    peers = mkOption {
+      description = ''
+        Other rigs whose running jobs go on the board, after this one's. Set
+        for you on the rig that runs `rigs.fleetd`, to every other member, so
+        the broker's screen shows the whole fleet and every other rig shows
+        only itself.
+      '';
+      type = types.listOf (
+        types.submodule {
+          options = {
+            name = mkOption {
+              description = "The rig's name, as the board labels it.";
+              type = types.str;
+            };
+            url = mkOption {
+              description = "Base URL of that rig's build daemon.";
+              type = types.str;
+              example = "http://10.10.0.60:9000";
+            };
+          };
+        }
+      );
+      default = [ ];
     };
 
     server = {
@@ -226,13 +251,18 @@ in
             "-buildd"
             cfg.buildd
           ]
+          ++ lib.concatMap (peer: [
+            "-peer"
+            "${peer.name}=${peer.url}"
+          ]) cfg.peers
         );
 
         Restart = "always";
         RestartSec = "2s";
 
-        # It reads /proc and enumerates interfaces, and needs nothing else: no
-        # state, no writable path, no privileges, no user of its own.
+        # It reads /proc, enumerates interfaces and asks build daemons what
+        # they are running, and needs nothing else: no state, no writable
+        # path, no privileges, no user of its own.
         DynamicUser = true;
         CapabilityBoundingSet = [ "" ];
         NoNewPrivileges = true;

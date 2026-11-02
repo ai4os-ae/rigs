@@ -29,6 +29,11 @@ type Status struct {
 	Running    []string `json:"running"`
 	Capacity   int      `json:"capacity"`
 
+	// The same jobs as `running`, with what a screen needs to draw them: what
+	// kind each is and how long it has been going. Kept apart from `running`
+	// so that field stays the plain list of ids existing clients read.
+	RunningJobs []RunningJob `json:"running_jobs"`
+
 	// Fuzzing is reported separately because queue depth is the wrong question
 	// for it. A rig with an empty queue whose only fuzz slot is four hours into
 	// a campaign is not available for another one, and a broker that reads
@@ -44,8 +49,27 @@ type Status struct {
 	Mirror map[string]any `json:"mirror"`
 }
 
+// RunningJob is one running job, as the kiosk board draws it.
+type RunningJob struct {
+	ID        string     `json:"id"`
+	Kind      Kind       `json:"kind"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
 func collectStatus(runner *Runner, mirror *Mirror) Status {
 	hostname, _ := os.Hostname()
+
+	running := runner.Running()
+	jobs := make([]RunningJob, 0, len(running))
+	for _, id := range running {
+		// Gone from the store between the two reads: it finished, and the
+		// next poll will not list it either.
+		job, ok := runner.store.Get(id)
+		if !ok {
+			continue
+		}
+		jobs = append(jobs, RunningJob{ID: id, Kind: job.Spec.Kind, StartedAt: job.StartedAt})
+	}
 
 	kinds := []string{string(KindBuild), string(KindTest)}
 	if runner.cfg.Limits.FuzzEnabled {
@@ -58,8 +82,9 @@ func collectStatus(runner *Runner, mirror *Mirror) Status {
 		Time:           time.Now().UTC(),
 		Kinds:          kinds,
 		QueueDepth:     runner.QueueDepth(),
-		Running:        runner.Running(),
+		Running:        running,
 		Capacity:       runner.cfg.Capacity,
+		RunningJobs:    jobs,
 		FuzzQueueDepth: runner.FuzzQueueDepth(),
 		FuzzSlotsFree:  runner.FuzzSlotsFree(),
 		FuzzCapacity:   runner.cfg.FuzzCapacity,

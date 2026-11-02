@@ -134,6 +134,12 @@ in
       }
     ];
 
+    # The broker's rig is the one whose screen shows the whole fleet. Its own
+    # jobs already come from loopback, so only the others are added.
+    rigs.kiosk.peers = lib.mkIf config.rigs.kiosk.enable (
+      lib.filter (m: m.name != config.networking.hostName) cfg.members
+    );
+
     # Matched on the peer's signed certificate name, so this admits that one
     # node to that one port and grants nothing to anybody else who reaches it.
     rigs.nebula.extraInbound = lib.optional (cfg.reverseProxy != null) {

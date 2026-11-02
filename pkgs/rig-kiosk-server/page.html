@@ -45,12 +45,6 @@
       }
 
       body {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 3.5rem;
-
         background: var(--base);
         color: var(--ink);
         font-family: sans-serif;
@@ -162,42 +156,203 @@
         }
       }
 
+      /* Header across the top, the job board filling the middle, the
+         readings in a narrow column down the right, and the warning along the
+         bottom. The board is the thing that changes, so it gets the room. */
+      .page {
+        box-sizing: border-box;
+        height: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) clamp(15rem, 21vw, 23rem);
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        grid-template-areas:
+          "header header"
+          "board side"
+          "footer footer";
+        gap: 2rem clamp(2rem, 3.5vw, 3.5rem);
+        padding: clamp(1.5rem, 3vh, 2.5rem) clamp(1.5rem, 3vw, 3rem);
+      }
+
+      header {
+        grid-area: header;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 2rem;
+        padding-bottom: 1.25rem;
+        border-bottom: 1px solid var(--rule);
+      }
+
       .title {
-        text-align: center;
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.4rem 1.25rem;
+        min-width: 0;
       }
 
       h1 {
         margin: 0;
-        font-size: clamp(3rem, 9vw, 8rem);
+        font-size: clamp(2rem, 4vw, 3.75rem);
         font-weight: 600;
         letter-spacing: -0.03em;
         line-height: 1;
       }
 
       .subheading {
-        margin: 0.75rem 0 0;
-        font-size: clamp(1.5rem, 3.2vw, 3rem);
+        margin: 0;
+        font-size: clamp(1.1rem, 2vw, 1.9rem);
         font-weight: 400;
         color: var(--muted);
         letter-spacing: 0.02em;
       }
 
-      .facts {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: clamp(2rem, 6vw, 6rem);
+      .clock {
         margin: 0;
-        padding: 2rem clamp(1rem, 4vw, 4rem) 0;
-        border-top: 1px solid var(--rule);
+        flex: none;
+        font-size: clamp(1.1rem, 2vw, 1.9rem);
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
       }
 
-      .fact {
-        text-align: center;
+      /* ---- Job board -----------------------------------------------------
+         One panel per rig, one tile per running job, and an outline for each
+         build slot nobody is using — so a glance from across the room says
+         both what is running and how much room is left. */
+      .board {
+        grid-area: board;
+        display: flex;
+        flex-direction: column;
+        gap: 2rem;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      /* The display: flex above would otherwise win over the attribute. */
+      .board[hidden] {
+        display: none;
+      }
+
+      .rig-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.9rem;
+      }
+
+      .rig-name {
+        margin: 0;
+        font-size: clamp(1.1rem, 1.7vw, 1.6rem);
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+
+      .rig-summary {
+        font-size: clamp(0.85rem, 1.2vw, 1.15rem);
+        color: var(--muted);
+        letter-spacing: 0.04em;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .rig.down {
+        opacity: 0.45;
+      }
+
+      .rig.down .rig-summary {
+        color: #ff8f8f;
+      }
+
+      .slots {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(clamp(10.5rem, 13vw, 15rem), 1fr));
+        gap: 0.9rem;
+      }
+
+      /* Each kind has its own colour, used on the tile's edge and its label:
+         a fuzz run that has been going for six hours is expected, a build
+         that has been going for six hours is not, and the colour is what
+         makes that distinction without reading. */
+      .job {
+        --kind: var(--muted);
+        box-sizing: border-box;
+        min-height: 6.5rem;
+        padding: 0.9rem 1.1rem;
+        border: 1px solid var(--rule);
+        border-left: 4px solid var(--kind);
+        border-radius: 0.75rem;
+        background: rgba(4, 18, 46, 0.55);
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .job.build {
+        --kind: #6fa8ff;
+      }
+
+      .job.test {
+        --kind: #5fd3a8;
+      }
+
+      .job.fuzz {
+        --kind: #c79bff;
+      }
+
+      .job .kind {
+        font-size: clamp(0.65rem, 0.85vw, 0.8rem);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: var(--kind);
+      }
+
+      .job .id {
+        font-family: "DejaVu Sans Mono", monospace;
+        font-size: clamp(1rem, 1.4vw, 1.35rem);
+        letter-spacing: 0.02em;
+      }
+
+      .job .elapsed {
+        margin-top: auto;
+        font-size: clamp(1.3rem, 2vw, 1.9rem);
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .job.free {
+        border: 1px dashed var(--rule);
+        background: none;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-size: clamp(0.75rem, 1vw, 0.95rem);
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        opacity: 0.6;
+      }
+
+      /* ---- Readings ------------------------------------------------------ */
+      .side {
+        grid-area: side;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        min-height: 0;
+        padding-left: clamp(1.5rem, 2.5vw, 2.5rem);
+        border-left: 1px solid var(--rule);
+      }
+
+      .facts {
+        display: flex;
+        flex-direction: column;
+        gap: clamp(1rem, 2.2vh, 1.6rem);
+        margin: 0;
       }
 
       .fact dt {
-        font-size: clamp(0.75rem, 1.1vw, 1rem);
+        font-size: clamp(0.65rem, 0.85vw, 0.8rem);
         font-weight: 500;
         text-transform: uppercase;
         letter-spacing: 0.18em;
@@ -205,10 +360,11 @@
       }
 
       .fact dd {
-        margin: 0.6rem 0 0;
-        font-size: clamp(1.25rem, 2.4vw, 2.25rem);
+        margin: 0.35rem 0 0;
+        font-size: clamp(1rem, 1.5vw, 1.4rem);
         font-weight: 500;
         font-variant-numeric: tabular-nums;
+        overflow-wrap: anywhere;
       }
 
       /* A throttling rig, in the same amber the screensaver reaches at its
@@ -226,24 +382,20 @@
       }
 
       .fact dd .line + .line {
-        margin-top: 0.5rem;
+        margin-top: 0.4rem;
       }
 
-      .fact dd .iface {
+      .fact dd .iface,
+      .fact dd .since {
         display: block;
-        font-size: 0.55em;
+        font-size: 0.65em;
         font-weight: 400;
         color: var(--muted);
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
       }
 
       footer {
-        position: fixed;
-        bottom: 1.75rem;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 0.9rem;
+        grid-area: footer;
         text-align: center;
       }
 
@@ -252,42 +404,33 @@
       .warning {
         margin: 0;
         color: #ff5f5f;
-        font-size: clamp(1rem, 1.9vw, 1.75rem);
+        font-size: clamp(1rem, 1.7vw, 1.6rem);
         font-weight: 700;
         letter-spacing: 0.04em;
       }
 
-      .meta {
-        margin: 0;
-        font-size: clamp(0.8rem, 1.2vw, 1.05rem);
-        color: var(--muted);
-        letter-spacing: 0.06em;
-      }
-
-      /* Bottom right, out of the way of the centred column. White card behind
-         it on purpose: a QR inverted or floated on a dark background is a
-         coin-flip on how well a given phone camera reads it. */
+      /* Foot of the readings column. White card behind it on purpose: a QR
+         inverted or floated on a dark background is a coin-flip on how well a
+         given phone camera reads it. */
       .qr {
-        position: fixed;
-        right: 2.25rem;
-        bottom: 2.25rem;
+        margin: auto 0 0;
         display: flex;
         flex-direction: column;
-        align-items: center;
+        align-items: flex-start;
         gap: 0.55rem;
       }
 
       .qr img {
         display: block;
-        width: clamp(88px, 9vw, 150px);
+        width: clamp(80px, 7.5vw, 130px);
         height: auto;
-        padding: 0.6rem;
+        padding: 0.55rem;
         border-radius: 0.6rem;
         background: #ffffff;
       }
 
       .qr figcaption {
-        font-size: clamp(0.7rem, 0.95vw, 0.95rem);
+        font-size: clamp(0.7rem, 0.9vw, 0.9rem);
         color: var(--muted);
         letter-spacing: 0.05em;
       }
@@ -295,8 +438,9 @@
       /* The page keeps showing the last good reading if polling stops; dimming
          is what says it is no longer live, so nobody reads a stale uptime as a
          current one. The warning is not a reading and never dims. */
+      body.stale .board,
       body.stale .facts,
-      body.stale .meta {
+      body.stale .clock {
         opacity: 0.35;
         transition: opacity 1s ease;
       }
@@ -307,17 +451,11 @@
          same bright text in the same pixels all week. It is a screensaver, so
          it is built to be ignorable: nothing flashes, nothing snaps, and any
          key or movement puts the readings straight back. */
-      .title,
-      .facts,
-      footer,
-      .qr {
+      .page {
         transition: opacity 2.5s ease;
       }
 
-      body.screensaver .title,
-      body.screensaver .facts,
-      body.screensaver footer,
-      body.screensaver .qr {
+      body.screensaver .page {
         opacity: 0;
       }
 
@@ -415,69 +553,163 @@
       <div class="glow three"></div>
     </div>
 
-    <div class="title">
-      <h1 id="heading">{{ .Heading }}</h1>
-      <p class="subheading" id="subheading">{{ .Subheading }}</p>
+    <div class="page">
+      <header>
+        <div class="title">
+          <h1 id="heading">{{ .Heading }}</h1>
+          <p class="subheading" id="subheading">{{ .Subheading }}</p>
+        </div>
+        <p class="clock" id="time">{{ .Time }}</p>
+      </header>
+
+      <!-- Filled in by the script, from the same status it polls for. -->
+      <main class="board" id="board"></main>
+
+      <aside class="side">
+        <dl class="facts">
+          <div class="fact">
+            <dt>Uptime</dt>
+            <dd><span id="uptime">{{ .Uptime }}</span><span class="since">since <span id="booted">{{ .BootedAt }}</span></span></dd>
+          </div>
+
+          <div class="fact">
+            <dt>Address</dt>
+            <dd id="addresses">
+              {{- if .Addresses -}}
+                {{- range .Addresses }}<span class="line">{{ .IP }}<span class="iface">{{ .Interface }}</span></span>{{ end -}}
+              {{- else -}}
+                no network
+              {{- end -}}
+            </dd>
+          </div>
+
+          <div class="fact">
+            <dt>Kernel</dt>
+            <dd id="kernel">{{ .Kernel }}</dd>
+          </div>
+
+          <div class="fact">
+            <dt>Load</dt>
+            <dd id="load">{{ .Load }}</dd>
+          </div>
+
+          {{ if .Temperature }}
+            <div class="fact">
+              <dt>CPU</dt>
+              <dd id="temperature" class="{{ if .Temperature.Throttling }}hot{{ end }}">{{ .Temperature.Text }}</dd>
+            </div>
+          {{ end }}
+        </dl>
+
+        {{ if .HasQR }}
+          <figure class="qr">
+            <img src="/qr.svg" alt="QR code for {{ .Link }}" />
+            <figcaption>{{ .LinkLabel }}</figcaption>
+          </figure>
+        {{ end }}
+      </aside>
+
+      <footer>
+        <p class="warning" id="warning">{{ .Warning }}</p>
+      </footer>
     </div>
-
-    <dl class="facts">
-      <div class="fact">
-        <dt>Uptime</dt>
-        <dd id="uptime">{{ .Uptime }}</dd>
-      </div>
-
-      <div class="fact">
-        <dt>Address</dt>
-        <dd id="addresses">
-          {{- if .Addresses -}}
-            {{- range .Addresses }}<span class="line">{{ .IP }}<span class="iface">{{ .Interface }}</span></span>{{ end -}}
-          {{- else -}}
-            no network
-          {{- end -}}
-        </dd>
-      </div>
-
-      <div class="fact">
-        <dt>Load</dt>
-        <dd id="load">{{ .Load }}</dd>
-      </div>
-
-      {{ if .Temperature }}
-        <div class="fact">
-          <dt>CPU</dt>
-          <dd id="temperature" class="{{ if .Temperature.Throttling }}hot{{ end }}">{{ .Temperature.Text }}</dd>
-        </div>
-      {{ end }}
-
-      {{ if .Jobs }}
-        <div class="fact">
-          <dt>Jobs</dt>
-          <dd id="jobs">{{ .Jobs }}</dd>
-        </div>
-      {{ end }}
-    </dl>
-
-    <footer>
-      <p class="warning" id="warning">{{ .Warning }}</p>
-      <p class="meta"><span id="time">{{ .Time }}</span> · booted <span id="booted">{{ .BootedAt }}</span></p>
-    </footer>
 
     <div class="bouncer" id="bouncer" aria-hidden="true">
       <span class="mark">AI4OS</span>
       {{ if .Warning }}<span class="note">Do Not Unplug</span>{{ end }}
     </div>
 
-    {{ if .HasQR }}
-      <figure class="qr">
-        <img src="/qr.svg" alt="QR code for {{ .Link }}" />
-        <figcaption>{{ .LinkLabel }}</figcaption>
-      </figure>
-    {{ end }}
-
     <script>
       // Poll rather than reload: a full navigation every few seconds churns the
       // browser and restarts the background animation each time.
       const REFRESH_MS = 5000;
+
+      // ---- Job board -----------------------------------------------------
+      // The server says how long each job had been running when it answered;
+      // the page counts on from there once a second with its own clock, so
+      // the timers move between polls without any more requests.
+      const KINDS = { build: "Build", test: "Test", fuzz: "Fuzz" };
+
+      const two = (n) => String(n).padStart(2, "0");
+
+      const formatElapsed = (seconds) => {
+        const s = Math.floor(seconds);
+        if (s < 60) {
+          return `${s}s`;
+        }
+        if (s < 3600) {
+          return `${Math.floor(s / 60)}m ${two(s % 60)}s`;
+        }
+        if (s < 86400) {
+          return `${Math.floor(s / 3600)}h ${two(Math.floor(s / 60) % 60)}m`;
+        }
+        return `${Math.floor(s / 86400)}d ${Math.floor(s / 3600) % 24}h`;
+      };
+
+      // Each running tile's timer, as [element, elapsed when received, when
+      // received]. Replaced wholesale on every render.
+      let timers = [];
+
+      const tick = () => {
+        const now = performance.now();
+        for (const [element, elapsed, received] of timers) {
+          element.textContent = formatElapsed(elapsed + (now - received) / 1000);
+        }
+      };
+
+      const element = (tag, className, text) => {
+        const node = document.createElement(tag);
+        node.className = className;
+        if (text !== undefined) {
+          node.textContent = text;
+        }
+        return node;
+      };
+
+      const renderBoard = (rigs) => {
+        const board = document.getElementById("board");
+        const received = performance.now();
+
+        timers = [];
+        board.replaceChildren();
+        board.hidden = !rigs || rigs.length === 0;
+
+        for (const rig of rigs || []) {
+          const panel = element("section", rig.up ? "rig" : "rig down");
+
+          const head = element("div", "rig-head");
+          head.append(element("h2", "rig-name", rig.name), element("span", "rig-summary", rig.summary));
+          panel.appendChild(head);
+
+          if (rig.up) {
+            const slots = element("div", "slots");
+
+            for (const job of rig.jobs) {
+              const tile = element("div", `job ${job.kind}`);
+              const elapsed = element("span", "elapsed", "—");
+
+              tile.append(element("span", "kind", KINDS[job.kind] || "Job"), element("span", "id", job.id), elapsed);
+              slots.appendChild(tile);
+
+              if (job.elapsed_seconds !== null) {
+                timers.push([elapsed, job.elapsed_seconds, received]);
+              }
+            }
+
+            for (let i = 0; i < rig.free_slots; i++) {
+              slots.appendChild(element("div", "job free", "free"));
+            }
+
+            panel.appendChild(slots);
+          }
+
+          board.appendChild(panel);
+        }
+
+        tick();
+      };
+
+      setInterval(tick, 1000);
 
       const render = (status) => {
         // The wording comes from the server too, not just the numbers: cage is
@@ -489,26 +721,23 @@
         document.getElementById("warning").textContent = status.warning;
 
         document.getElementById("uptime").textContent = status.uptime;
+        document.getElementById("booted").textContent = status.booted_at;
+        document.getElementById("kernel").textContent = status.kernel;
         document.getElementById("load").textContent = status.load;
+        document.getElementById("time").textContent = status.time;
 
-        // Absent on a rig with no build daemon: the row is left out of the
-        // markup entirely rather than sitting there permanently blank.
-        const jobs = document.getElementById("jobs");
-        if (jobs && status.jobs) {
-          jobs.textContent = status.jobs;
-        }
+        renderBoard(status.rigs);
 
-        // Likewise absent where the kernel exposes no package sensor. The
-        // colour is the whole reason this row is worth a glance from across a
-        // room: a warm rig looks like every other reading, a throttling one
-        // does not.
+        // Absent where the kernel exposes no package sensor: the row is left
+        // out of the markup entirely rather than sitting there permanently
+        // blank. The colour is the whole reason this row is worth a glance
+        // from across a room: a warm rig looks like every other reading, a
+        // throttling one does not.
         const temperature = document.getElementById("temperature");
         if (temperature && status.temperature) {
           temperature.textContent = status.temperature.text;
           temperature.classList.toggle("hot", status.temperature.throttling);
         }
-        document.getElementById("time").textContent = status.time;
-        document.getElementById("booted").textContent = status.booted_at;
 
         const addresses = document.getElementById("addresses");
         addresses.replaceChildren();
@@ -546,6 +775,9 @@
         }
       };
 
+      // The first render is from the status the page was served with, so the
+      // board is there from the first frame rather than one poll later.
+      render({{ . }});
       setInterval(refresh, REFRESH_MS);
 
       // ---- Screensaver ---------------------------------------------------

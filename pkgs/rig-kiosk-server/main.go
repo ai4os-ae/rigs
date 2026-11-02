@@ -1,5 +1,7 @@
 // rig-kiosk-server draws the page on an AI4OS rig's own screen: what the
-// machine is, where it is on the network, and how long it has been up.
+// machine is, where it is on the network, how long it has been up, and which
+// jobs are running on it — and, on the rig that runs the fleet broker, on
+// every other rig as well.
 //
 // It listens on loopback and is read by the Chromium kiosk session on the same
 // machine. Nothing here is authenticated, so what it reports is deliberately
@@ -10,12 +12,14 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,7 +44,16 @@ func main() {
 	qrPath := flag.String("qr", defaultQR, "SVG of the QR code to display; empty to leave it off")
 	idle := flag.Duration("idle", 10*time.Minute, "how long without input before the screensaver takes over")
 	screensaver := flag.Duration("screensaver", time.Minute, "how long the screensaver runs; zero to leave it off")
-	buildd := flag.String("buildd", "", "base URL of this rig's build daemon; empty leaves the jobs line off the page")
+	buildd := flag.String("buildd", "", "base URL of this rig's build daemon; empty leaves it off the job board")
+	var peers []Rig
+	flag.Func("peer", "another rig to put on the job board, as name=url; repeatable", func(value string) error {
+		name, url, ok := strings.Cut(value, "=")
+		if !ok || name == "" || url == "" {
+			return fmt.Errorf("%q is not name=url", value)
+		}
+		peers = append(peers, Rig{Name: name, URL: strings.TrimSuffix(url, "/")})
+		return nil
+	})
 	flag.Parse()
 
 	log.SetFlags(0) // The journal already stamps every line.
@@ -66,6 +79,17 @@ func main() {
 		text.HasQR = true
 	}
 
+	// This rig first, under its own name, then the others in the order given.
+	var rigs []Rig
+	if *buildd != "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			hostname = "this rig"
+		}
+		rigs = append(rigs, Rig{Name: hostname, URL: strings.TrimSuffix(*buildd, "/")})
+	}
+	rigs = append(rigs, peers...)
+
 	// One reader for the life of the process: it remembers the last throttle
 	// counter it saw, which is the only way to tell "this rig is throttling
 	// now" from "this rig was too hot once, three weeks ago".
@@ -79,7 +103,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		if err := page.Execute(w, collect(time.Now(), text, *buildd, sensors)); err != nil {
+		if err := page.Execute(w, collect(time.Now(), text, rigs, sensors)); err != nil {
 			// Too late for an error status: the template writes as it renders.
 			log.Printf("rendering page: %v", err)
 		}
@@ -89,7 +113,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 
-		if err := json.NewEncoder(w).Encode(collect(time.Now(), text, *buildd, sensors)); err != nil {
+		if err := json.NewEncoder(w).Encode(collect(time.Now(), text, rigs, sensors)); err != nil {
 			log.Printf("encoding status: %v", err)
 		}
 	})

@@ -1,11 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -46,10 +43,15 @@ type Status struct {
 	Addresses  []Address `json:"addresses"`
 	Time       string    `json:"time"`
 
-	// What the build daemon is doing, as one short line. Empty when this rig
-	// runs no build daemon, in which case the page leaves the row out
-	// altogether rather than showing a permanently blank fact.
-	Jobs string `json:"jobs"`
+	// The running Linux kernel, as `uname -r` prints it. A rig rebuilds
+	// itself every night, so this is what says whether it has rebooted into
+	// the kernel its configuration asks for.
+	Kernel string `json:"kernel"`
+
+	// The job board: every rig this screen watches, this one first. Empty when
+	// this rig runs no build daemon and watches no others, in which case the
+	// page leaves the board out altogether.
+	Rigs []RigJobs `json:"rigs"`
 
 	// How hot the CPU is, and whether it is throttling. Null on a machine
 	// whose kernel exposes no package sensor — a virtual machine, mostly — and
@@ -73,7 +75,7 @@ func (a Address) String() string { return a.Interface + "  " + a.IP }
 //
 // `sensors` is the one argument that is not a setting: throttling is a
 // difference between two reads, so something has to remember the last one.
-func collect(now time.Time, text Text, buildd string, sensors *thermal) Status {
+func collect(now time.Time, text Text, rigs []Rig, sensors *thermal) Status {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
@@ -91,75 +93,27 @@ func collect(now time.Time, text Text, buildd string, sensors *thermal) Status {
 		Addresses:   addresses(),
 		Time:        now.Format("Mon 2 Jan 15:04"),
 		Uptime:      "unknown",
-		Jobs:        buildJobs(buildd),
+		Kernel:      kernelRelease(),
+		Rigs:        boardOf(rigs),
 		Temperature: sensors.read(now),
 	}
 
 	if up, err := uptime(); err == nil {
 		s.UptimeSecs = up.Seconds()
 		s.Uptime = formatDuration(up)
-		s.BootedAt = now.Add(-up).Format("Mon 2 Jan 15:04")
+		s.BootedAt = now.Add(-up).Format("2 Jan 15:04")
 	}
 
 	return s
 }
 
-// The page polls every few seconds, so a build daemon that has stopped
-// answering must not hold the whole status response open. A short timeout on
-// loopback is generous.
-var builddClient = &http.Client{Timeout: 800 * time.Millisecond}
-
-// buildJobs asks the build daemon what it is doing and reduces it to one line.
-//
-// This is read from across a room by somebody deciding whether the rig is busy,
-// so it is a count and not a job list: which jobs they are is a question for
-// the API, which is where anybody who needs the answer already is.
-func buildJobs(buildd string) string {
-	if buildd == "" {
-		return ""
-	}
-
-	resp, err := builddClient.Get(buildd + "/v1/status")
+// kernelRelease reads what `uname -r` would print, without running it.
+func kernelRelease() string {
+	raw, err := os.ReadFile("/proc/sys/kernel/osrelease")
 	if err != nil {
-		return "unavailable"
+		return "unknown"
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "unavailable"
-	}
-
-	var status struct {
-		QueueDepth int      `json:"queue_depth"`
-		Running    []string `json:"running"`
-		// Fuzz runs are counted rather than listed, and are derived rather
-		// than reported directly: `running` already contains them, so
-		// separating the two is what stops a four-hour campaign showing up as
-		// a build that will be finished shortly.
-		FuzzSlotsFree int `json:"fuzz_slots_free"`
-		FuzzCapacity  int `json:"fuzz_capacity"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&status); err != nil {
-		return "unavailable"
-	}
-
-	fuzzing := max(status.FuzzCapacity-status.FuzzSlotsFree, 0)
-	building := max(len(status.Running)-fuzzing, 0)
-
-	var parts []string
-	if building > 0 {
-		parts = append(parts, fmt.Sprintf("%d building", building))
-	}
-	if fuzzing > 0 {
-		parts = append(parts, fmt.Sprintf("%d fuzzing", fuzzing))
-	}
-	if status.QueueDepth > 0 {
-		parts = append(parts, fmt.Sprintf("%d queued", status.QueueDepth))
-	}
-	if len(parts) == 0 {
-		return "idle"
-	}
-	return strings.Join(parts, " · ")
+	return strings.TrimSpace(string(raw))
 }
 
 // uptime reads /proc/uptime rather than shelling out to `uptime`, whose output
