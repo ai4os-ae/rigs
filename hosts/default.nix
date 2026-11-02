@@ -5,6 +5,43 @@
   ...
 }:
 {
+  # An SBOM of what a rig actually runs — its system closure — via sbomnix:
+  # `nix run .#sbom -- <host>` writes sbom-<host>.{cdx.json,spdx.json,csv} to
+  # the current directory. Anything after the host is passed through to
+  # sbomnix, so `--buildtime` gives the build-time closure instead, and an
+  # output flag overrides the default path. Evaluates against this flake as it
+  # was when `nix run` was invoked, uncommitted changes included.
+  perSystem =
+    { pkgs, ... }:
+    {
+      apps.sbom = {
+        type = "app";
+        meta.description = "Generate an SBOM for a host with sbomnix";
+        program = lib.getExe (
+          pkgs.writeShellApplication {
+            name = "rig-sbom";
+            runtimeInputs = [ pkgs.sbomnix ];
+            text = ''
+              hosts="${lib.concatStringsSep " " (builtins.attrNames self.nixosConfigurations)}"
+              if [ $# -lt 1 ] || [[ " $hosts " != *" $1 "* ]]; then
+                echo "usage: nix run .#sbom -- <host> [sbomnix args...]" >&2
+                echo "hosts: $hosts" >&2
+                exit 1
+              fi
+              host=$1
+              shift
+              exec sbomnix \
+                --cdx "sbom-$host.cdx.json" \
+                --spdx "sbom-$host.spdx.json" \
+                --csv "sbom-$host.csv" \
+                "$@" \
+                "path:${self}#nixosConfigurations.$host.config.system.build.toplevel"
+            '';
+          }
+        );
+      };
+    };
+
   flake =
     let
       specialArgs = { inherit self inputs; };

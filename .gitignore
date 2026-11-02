@@ -28,3 +28,6 @@ __pycache__/
 /pkgs/rig-buildd/rig-buildd
 /pkgs/rig-fleetd/rig-fleetd
 /pkgs/rig-kiosk-server/rig-kiosk-server
+
+# SBOMs from `nix run .#sbom -- <host>`
+/sbom-*

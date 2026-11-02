@@ -59,6 +59,7 @@ namespace.
 nix develop            # sops, ssh-to-age, nixos-anywhere, nixos-rebuild
 nix fmt                # nixfmt + deadnix + statix + shellcheck
 nix flake check        # evaluates every rig; slow
+nix run .#sbom -- <host>   # sbomnix SBOM of the rig's closure: sbom-<host>.{cdx.json,spdx.json,csv}
 ```
 
 To check a single rig without the full flake check:
