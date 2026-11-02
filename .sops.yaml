@@ -26,6 +26,7 @@ keys:
   # `age.sshKeyPaths` in modules/base/secrets.nix — so a rig's key only exists
   # once it has been installed and generated a host key.
   - &laptop-01 age1cmstz280tqq2s5ukrl7x78974k7fz2dsshp6stcflhyut7fdfgqs7pmhlk
+  - &desktop-01 age1qhk4mapltw77evvdyq6ut0cq9ckmn0ks85nw5fc0seutyr325vtqaghhy6
 
 creation_rules:
   # Shared across every rig.
@@ -34,6 +35,7 @@ creation_rules:
       - age:
           - *humaid-anoa
           - *laptop-01
+          - *desktop-01
 
   # Per-host secrets: only the rig itself and the admins can read them.
   - path_regex: secrets/laptop-01\.yaml$
@@ -41,3 +43,9 @@ creation_rules:
       - age:
           - *humaid-anoa
           - *laptop-01
+
+  - path_regex: secrets/desktop-01\.yaml$
+    key_groups:
+      - age:
+          - *humaid-anoa
+          - *desktop-01

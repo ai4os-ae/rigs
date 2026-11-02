@@ -12,6 +12,7 @@
     {
       nixosModules = {
         host-laptop-01 = import ./laptop-01;
+        host-desktop-01 = import ./desktop-01;
         host-installer = import ./installer.nix;
       };
 
@@ -20,6 +21,14 @@
           inherit specialArgs;
           modules = [
             self.nixosModules.host-laptop-01
+            inputs.srvos.nixosModules.server
+          ];
+        };
+
+        desktop-01 = lib.nixosSystem {
+          inherit specialArgs;
+          modules = [
+            self.nixosModules.host-desktop-01
             inputs.srvos.nixosModules.server
           ];
         };
@@ -70,6 +79,7 @@
 
       hydraJobs.x86_64-linux = {
         laptop-01 = self.nixosConfigurations.laptop-01.config.system.build.toplevel;
+        desktop-01 = self.nixosConfigurations.desktop-01.config.system.build.toplevel;
         inherit (self.packages.x86_64-linux)
           netboot
           kexec

@@ -40,6 +40,7 @@ let
   hosts = {
     ${lighthouse} = [ "hisn" ];
     "10.10.0.60" = [ "laptop-01" ];
+    "10.10.0.62" = [ "desktop-01" ];
   };
 in
 {

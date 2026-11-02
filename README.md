@@ -13,6 +13,7 @@ night.
 | Name        | System              | CPU              | RAM  | Disk            | Mesh        | Role    | State |
 |-------------|---------------------|------------------|------|-----------------|-------------|---------|-------|
 | `laptop-01` | Dell Latitude 7440  | i7-1365U (12T)   | 32GB | 512GB NVMe      | 10.10.0.60  | Compute | New   |
+| `desktop-01` | Desktop             | Core Ultra 7 265 (20T) | 128GB | 2TB NVMe | 10.10.0.62  | Compute | New   |
 
 `laptop-01` has no ethernet port — wireless is its only uplink. That is why
 `modules/base/wifi.nix` exists and why its install pre-seeds the host key (see
