@@ -73,18 +73,8 @@
     bootstrap = false;
   };
 
-  # Same network and credential as laptop-01; see the comment there.
-  rigs.wifi = lib.mkIf (!config.rigs.bootstrap) {
-    enable = true;
-    secretsFile = config.sops.secrets."wifi/env".path;
-    networks."MBZUAI-STUDENT" = {
-      priority = 10;
-      enterprise = {
-        identity = "humaid.alqasimi@mbzuai.ac.ae";
-        passwordSecret = "mbzuai_password";
-      };
-    };
-  };
+  # Same gate as laptop-01; the networks are fleet-wide.
+  rigs.wifi.enable = !config.rigs.bootstrap;
 
   # 10.10.0.62 on the mesh, in the `ai4os` group.
   rigs.nebula = lib.mkIf (!config.rigs.bootstrap) {
@@ -101,13 +91,6 @@
       sopsFile = ../../secrets/desktop-01.yaml;
       owner = "rig-fleetd";
       restartUnits = [ "rig-fleetd.service" ];
-    };
-
-    # Owned by wpa_supplicant for the reason given on laptop-01.
-    "wifi/env" = {
-      sopsFile = ../../secrets/desktop-01.yaml;
-      owner = "wpa_supplicant";
-      restartUnits = [ "wpa_supplicant.service" ];
     };
 
     "nebula/crt" = {
