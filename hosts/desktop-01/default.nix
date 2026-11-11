@@ -41,6 +41,11 @@
     buildd = {
       enable = true;
       maxConcurrent = 8;
+
+      # One syzkaller campaign at a time. The defaults size the VM pool to
+      # what is left after a 24GB / 2-core host reserve, which leaves the
+      # build slots room to keep running alongside.
+      fuzz.enable = true;
     };
 
     # The fleet's front door, moved here from laptop-01: this is the rig that
