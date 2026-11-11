@@ -57,6 +57,11 @@ type Status struct {
 	// whose kernel exposes no package sensor — a virtual machine, mostly — and
 	// the row is left out in that case for the same reason as jobs.
 	Temperature *Temperature `json:"temperature"`
+
+	// How much memory is in use, and how full the disk is. Null where they
+	// cannot be read, and the row is left out, as for temperature.
+	Memory *Usage `json:"memory"`
+	Disk   *Usage `json:"disk"`
 }
 
 // Address is one usable address on one interface. Loopback and link-local are
@@ -96,6 +101,8 @@ func collect(now time.Time, text Text, rigs []Rig, sensors *thermal) Status {
 		Kernel:      kernelRelease(),
 		Rigs:        boardOf(rigs),
 		Temperature: sensors.read(now),
+		Memory:      memoryUsage(),
+		Disk:        diskUsage("/"),
 	}
 
 	if up, err := uptime(); err == nil {

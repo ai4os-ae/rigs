@@ -599,6 +599,20 @@
               <dd id="temperature" class="{{ if .Temperature.Throttling }}hot{{ end }}">{{ .Temperature.Text }}</dd>
             </div>
           {{ end }}
+
+          {{ if .Memory }}
+            <div class="fact">
+              <dt>Memory</dt>
+              <dd id="memory" class="{{ if .Memory.Full }}hot{{ end }}">{{ .Memory.Text }}</dd>
+            </div>
+          {{ end }}
+
+          {{ if .Disk }}
+            <div class="fact">
+              <dt>Disk</dt>
+              <dd id="disk" class="{{ if .Disk.Full }}hot{{ end }}">{{ .Disk.Text }}</dd>
+            </div>
+          {{ end }}
         </dl>
 
         {{ if .HasQR }}
@@ -737,6 +751,16 @@
         if (temperature && status.temperature) {
           temperature.textContent = status.temperature.text;
           temperature.classList.toggle("hot", status.temperature.throttling);
+        }
+
+        // Memory and disk, coloured the same amber once either is nine-tenths
+        // full: a full disk stops a rig taking jobs, full memory kills them.
+        for (const key of ["memory", "disk"]) {
+          const row = document.getElementById(key);
+          if (row && status[key]) {
+            row.textContent = status[key].text;
+            row.classList.toggle("hot", status[key].full);
+          }
         }
 
         const addresses = document.getElementById("addresses");
