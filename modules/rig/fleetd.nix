@@ -6,10 +6,10 @@
 # forwards it, and proxies everything afterwards, so a client sees a fleet
 # rather than a list of machines.
 #
-# Unlike the rigs, this is meant to be published — reverse-proxied from a host
-# with a public address — so every request carries an API key and there is no
-# unauthenticated path through it. It still listens on the mesh only; reaching
-# it from outside is the reverse proxy's job, not this module's.
+# Unlike the rigs, this is meant to be reached by people who are not on the
+# mesh — on the local network (`lanInterface`) or through a reverse proxy
+# (`reverseProxy`) — so every request carries an API key and there is no
+# unauthenticated path through it.
 #
 # It holds no job state. A job id is `<rig>.<id-on-that-rig>`, which is enough
 # to route every later request, so there is nothing here to keep in step with
@@ -25,8 +25,6 @@ let
   rig = config.rigs.rig;
 
   user = "rig-fleetd";
-
-  membersFile = pkgs.writeText "rig-fleet.json" (builtins.toJSON cfg.members);
 in
 {
   options.rigs.fleetd = {
@@ -66,7 +64,11 @@ in
               type = lib.types.str;
             };
             url = lib.mkOption {
-              description = "Base URL of that rig's build daemon.";
+              description = ''
+                Base URL of that rig's build daemon. May contain a
+                `config.sops.placeholder` — the list is rendered by sops, so
+                an address that is not to be in the repository need not be.
+              '';
               type = lib.types.str;
               example = "http://10.10.0.60:9000";
             };
@@ -120,6 +122,19 @@ in
       default = null;
       example = "hisn";
     };
+
+    lanInterface = lib.mkOption {
+      description = ''
+        Also serve the broker on port 80 of this interface, with its API
+        documentation at the root, for clients on the rig's local network that
+        are not on the mesh. Plain HTTP, so the API
+        key crosses that network in the clear — fine on a campus LAN, not
+        something to point at a public one. The API key check still applies.
+      '';
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "eno1";
+    };
   };
 
   config = lib.mkIf (rig.enable && cfg.enable) {
@@ -161,12 +176,51 @@ in
       "d ${cfg.stateDir} 0750 ${user} ${user} -"
     ];
 
+    # Rendered by sops rather than written to the store, so a member's
+    # address can be a secret.
+    sops.templates."fleetd/members.json" = {
+      content = builtins.toJSON cfg.members;
+      restartUnits = [ "rig-fleetd.service" ];
+    };
+
     # Socket-activated, so a client connecting while the broker is restarting
     # is queued rather than refused.
     systemd.sockets.rig-fleetd = {
       description = "Socket for the rig fleet broker";
       wantedBy = [ "sockets.target" ];
       socketConfig.ListenStream = toString cfg.port;
+    };
+
+    # Port 80: the API documentation at the root and the broker under /v1/,
+    # which is every path it serves. Listening on every address, so mesh
+    # members reach it at the rig's mesh address too, but only lanInterface's
+    # firewall lets 80 in from outside the mesh.
+    networking.firewall.interfaces = lib.mkIf (cfg.lanInterface != null) {
+      ${cfg.lanInterface}.allowedTCPPorts = [ 80 ];
+    };
+
+    services.nginx = lib.mkIf (cfg.lanInterface != null) {
+      enable = true;
+      recommendedProxySettings = true;
+
+      virtualHosts.rig-fleetd = {
+        default = true;
+        root = pkgs.callPackage ../../pkgs/rig-api-docs/package.nix { };
+
+        # A build is long and its output is a stream: a followed log has to
+        # arrive as it is produced and outlive any default timeout, and a
+        # large patch must not be turned away before the broker sees it.
+        locations."/v1/" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.port}";
+          extraConfig = ''
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_read_timeout 6h;
+            proxy_send_timeout 6h;
+            client_max_body_size 256m;
+          '';
+        };
+      };
     };
 
     systemd.services.rig-fleetd = {
@@ -179,17 +233,30 @@ in
       ];
 
       serviceConfig = {
-        ExecStart = lib.escapeShellArgs [
-          (lib.getExe cfg.package)
-          "-members"
-          membersFile
-          "-api-keys"
-          cfg.apiKeysFile
-          "-state"
-          cfg.stateDir
-          "-poll"
-          cfg.pollInterval
-        ];
+        ExecStart = lib.escapeShellArgs (
+          [
+            (lib.getExe cfg.package)
+            "-members"
+            "%d/members"
+            "-api-keys"
+            cfg.apiKeysFile
+            "-state"
+            cfg.stateDir
+            "-poll"
+            cfg.pollInterval
+          ]
+          ++ lib.optionals (config.rigs.buildd.tokenFile != null) [
+            "-buildd-token"
+            "%d/buildd-token"
+          ]
+        );
+
+        LoadCredential = [
+          "members:${config.sops.templates."fleetd/members.json".path}"
+        ]
+        ++ lib.optional (
+          config.rigs.buildd.tokenFile != null
+        ) "buildd-token:${config.rigs.buildd.tokenFile}";
 
         User = user;
         Group = user;

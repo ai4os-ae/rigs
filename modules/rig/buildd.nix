@@ -44,7 +44,7 @@ in
       description = ''
         Port to serve on. Reached over the mesh: the host firewall trusts
         `sifr0` and nothing else, so this is not exposed to whatever network
-        the rig happens to have joined.
+        the rig happens to have joined unless `openFirewall` says so.
       '';
       type = lib.types.port;
       default = 9000;
@@ -81,13 +81,25 @@ in
 
     tokenFile = lib.mkOption {
       description = ''
-        File holding a bearer token every request must carry. Null relies on
-        the mesh alone, which already authenticates and encrypts the connection
-        and restricts it to the `ai4os` and `trusted` groups — that is the
-        expected deployment, and this is for when it stops being enough.
+        File holding a bearer token every request must carry. The fleet's
+        shared `buildd/token` by default, which the broker and the kiosk send
+        too; null relies on the mesh alone, which authenticates the peer but
+        stops being enough as soon as a rig is reached any other way.
       '';
       type = lib.types.nullOr lib.types.path;
-      default = null;
+      default = if config.rigs.bootstrap then null else config.sops.secrets."buildd/token".path;
+      defaultText = lib.literalExpression ''config.sops.secrets."buildd/token".path, or null in bootstrap mode'';
+    };
+
+    openFirewall = lib.mkOption {
+      description = ''
+        Also accept connections on every other interface — the campus
+        network, for a rig the broker reaches there rather than over the mesh.
+        Plain HTTP, so the token crosses that network in the clear; it keeps
+        out anybody who does not have it, not anybody who can watch the wire.
+      '';
+      type = lib.types.bool;
+      default = false;
     };
 
     buildDir = lib.mkOption {
@@ -204,251 +216,272 @@ in
     };
   };
 
-  config = lib.mkIf (rig.enable && cfg.enable) {
-    # A rig with a screen should say whether it is busy. Wired here rather than
-    # per-host so that turning the daemon on is the whole of it.
-    rigs.kiosk.buildd = lib.mkIf config.rigs.kiosk.enable "http://127.0.0.1:${toString cfg.port}";
+  config = lib.mkMerge [
+    # Outside the gate below: the broker and the kiosk send this token too,
+    # and either can run on a rig that builds nothing. Root-owned and handed
+    # to each service with LoadCredential, so the kiosk's DynamicUser can
+    # read it as well.
+    (lib.mkIf (rig.enable && !config.rigs.bootstrap) {
+      sops.secrets."buildd/token".restartUnits =
+        lib.optional cfg.enable "rig-buildd.service"
+        ++ lib.optional config.rigs.fleetd.enable "rig-fleetd.service"
+        ++ lib.optional config.rigs.kiosk.enable "rig-kiosk-server.service";
+    })
 
-    users.users.${user} = {
-      isSystemUser = true;
-      group = user;
-      home = cfg.stateDir;
-      description = "rig build job daemon";
-    };
-    users.groups.${user} = { };
+    (lib.mkIf (rig.enable && cfg.enable) {
+      # A rig with a screen should say whether it is busy. Wired here rather than
+      # per-host so that turning the daemon on is the whole of it.
+      rigs.kiosk.buildd = lib.mkIf config.rigs.kiosk.enable "http://127.0.0.1:${toString cfg.port}";
 
-    # `/var/lib/rig` is a mount point owned by root and shared with whatever
-    # else a rig keeps there, so the daemon is given its own directory inside
-    # it rather than StateDirectory taking ownership of the parent.
-    systemd.tmpfiles.rules = [
-      "d /var/lib/rig 0755 root root -"
-      "d ${cfg.stateDir} 0750 ${user} ${user} -"
-      "d ${cfg.buildDir} 0755 root root -"
-    ];
+      users.users.${user} = {
+        isSystemUser = true;
+        group = user;
+        home = cfg.stateDir;
+        description = "rig build job daemon";
+      };
+      users.groups.${user} = { };
 
-    # A test job boots the kernel it is testing inside QEMU, and the
-    # derivation that does it asks for the `kvm` feature. Without the feature
-    # advertised the job is not scheduled at all — which is the right failure,
-    # and a clear one — and without /dev/kvm behind it QEMU would emulate every
-    # instruction and turn a ten second boot into several minutes.
-    #
-    # NixOS advertises kvm by default on a machine that has it. Asserted rather
-    # than assumed because the failure otherwise arrives at the first test job
-    # somebody submits, on a rig nobody is standing in front of.
-    assertions = [
-      {
-        assertion = lib.elem "kvm" config.nix.settings.system-features;
-        message = ''
-          rigs.buildd needs the "kvm" system feature: test jobs boot a kernel
-          under QEMU. Either this rig has no /dev/kvm, in which case it cannot
-          run test jobs, or nix.settings.system-features has been overridden
-          without it.
-        '';
-      }
-    ];
-
-    nix.settings = {
-      build-dir = cfg.buildDir;
-
-      # A base build tree is a couple of gigabytes and every commit and
-      # configuration gets its own, so a rig left alone will fill its disk.
-      # Automatic collection keeps it working without anybody visiting; a
-      # finished job's artifacts are protected from it by the GC root the
-      # daemon registers, so this only ever reclaims what nothing points at.
-      min-free = 20 * 1024 * 1024 * 1024;
-      max-free = 60 * 1024 * 1024 * 1024;
-    };
-
-    # Socket-activated so that a client connecting while the daemon is still
-    # starting is queued rather than refused.
-    systemd.sockets.rig-buildd = {
-      description = "Socket for the rig build job daemon";
-      wantedBy = [ "sockets.target" ];
-      socketConfig.ListenStream = toString cfg.port;
-    };
-
-    systemd.services.rig-buildd = {
-      description = "Runs build jobs on this rig";
-      requires = [ "rig-buildd.socket" ];
-      # Wanted, not merely ordered after: the first job on a rig clones the
-      # kernel, so starting before there is a network means failing that job
-      # rather than waiting for one.
-      wants = [ "network-online.target" ];
-      after = [
-        "network-online.target"
-        "nix-daemon.socket"
+      # `/var/lib/rig` is a mount point owned by root and shared with whatever
+      # else a rig keeps there, so the daemon is given its own directory inside
+      # it rather than StateDirectory taking ownership of the parent.
+      systemd.tmpfiles.rules = [
+        "d /var/lib/rig 0755 root root -"
+        "d ${cfg.stateDir} 0750 ${user} ${user} -"
+        "d ${cfg.buildDir} 0755 root root -"
       ];
 
-      # git to maintain the kernel mirror, nix to run the builds. Neither is
-      # baked into the package: the mirror is ordinary git, and the nix that
-      # runs a build must be the machine's own.
+      # A test job boots the kernel it is testing inside QEMU, and the
+      # derivation that does it asks for the `kvm` feature. Without the feature
+      # advertised the job is not scheduled at all — which is the right failure,
+      # and a clear one — and without /dev/kvm behind it QEMU would emulate every
+      # instruction and turn a ten second boot into several minutes.
       #
-      # The rest are for fuzzing, and none of them are optional there. A build
-      # or a test happens inside a Nix sandbox that brings its own tools;
-      # syz-manager runs here, in this unit, and shells out constantly.
-      path = [
-        pkgs.git
-        config.nix.package
-      ]
-      ++ lib.optionals cfg.fuzz.enable [
-        pkgs.qemu # the VMs
-        pkgs.openssh # ssh and scp into each one, and the key generated at first run
-        pkgs.binutils # addr2line and nm, for symbolising coverage out of vmlinux
-        # gcc is for C reproducers, which syzkaller compiles at *runtime* rather
-        # than at build time. See LIBRARY_PATH below.
-        pkgs.gcc
+      # NixOS advertises kvm by default on a machine that has it. Asserted rather
+      # than assumed because the failure otherwise arrives at the first test job
+      # somebody submits, on a rig nobody is standing in front of.
+      assertions = [
+        {
+          assertion = lib.elem "kvm" config.nix.settings.system-features;
+          message = ''
+            rigs.buildd needs the "kvm" system feature: test jobs boot a kernel
+            under QEMU. Either this rig has no /dev/kvm, in which case it cannot
+            run test jobs, or nix.settings.system-features has been overridden
+            without it.
+          '';
+        }
+        {
+          assertion = cfg.openFirewall -> cfg.tokenFile != null;
+          message = "rigs.buildd.openFirewall would expose an unauthenticated build daemon; it needs rigs.buildd.tokenFile.";
+        }
       ];
 
-      environment = {
-        HOME = cfg.stateDir;
-        XDG_CACHE_HOME = "${cfg.stateDir}/cache";
-      }
-      // lib.optionalAttrs cfg.fuzz.enable {
-        # BOTH OF THESE ARE ABOUT C REPRODUCERS, and getting either wrong costs
-        # you every one of them without a single error message.
-        #
-        # A crash reported as a syz program is a crash a maintainer cannot act
-        # on; the C reproducer is the artifact that matters. syzkaller builds
-        # them by shelling out to gcc while it runs, so neither of these is
-        # covered by anything pinned at build time.
-        #
-        # LIBRARY_PATH: syzkaller probes `gcc -static` and silently falls back
-        # to a dynamic link when it fails. A dynamically linked reproducer
-        # names a /nix/store ELF interpreter that does not exist inside the
-        # guest, so it fails to exec; syzkaller can only observe that no crash
-        # happened, concludes the bug does not reproduce in C, and throws the
-        # reproducer away. Interpolated rather than passed through
-        # lib.makeLibraryPath, which resolves glibc's "lib" output — the
-        # *dynamic* one — leaving the static libc silently off the path.
-        LIBRARY_PATH = "${pkgs.glibc.static}/lib";
+      nix.settings = {
+        build-dir = cfg.buildDir;
 
-        # CPATH must be empty, and it is set here so that nothing inherits one.
-        # To build a reproducer syzkaller preprocesses its executor header with
-        # `cpp -nostdinc -fdirectives-only` and relies on every #include
-        # failing to resolve. -nostdinc does not clear CPATH, so a non-empty
-        # one gives cpp somewhere to look and turns the expected non-fatal
-        # diagnostic into a fatal error. cpp dies twenty lines in, and because
-        # syzkaller only treats *empty* cpp output as failure it accepts the
-        # truncated header and emits a reproducer with no main(). The daemon
-        # also clears it per-process; this is the belt to that's braces.
-        CPATH = "";
+        # A base build tree is a couple of gigabytes and every commit and
+        # configuration gets its own, so a rig left alone will fill its disk.
+        # Automatic collection keeps it working without anybody visiting; a
+        # finished job's artifacts are protected from it by the GC root the
+        # daemon registers, so this only ever reclaims what nothing points at.
+        min-free = 20 * 1024 * 1024 * 1024;
+        max-free = 60 * 1024 * 1024 * 1024;
       };
 
-      serviceConfig = {
-        ExecStart = lib.escapeShellArgs (
-          [
-            (lib.getExe cfg.package)
-            "-state"
+      networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+
+      # Socket-activated so that a client connecting while the daemon is still
+      # starting is queued rather than refused.
+      systemd.sockets.rig-buildd = {
+        description = "Socket for the rig build job daemon";
+        wantedBy = [ "sockets.target" ];
+        socketConfig.ListenStream = toString cfg.port;
+      };
+
+      systemd.services.rig-buildd = {
+        description = "Runs build jobs on this rig";
+        requires = [ "rig-buildd.socket" ];
+        # Wanted, not merely ordered after: the first job on a rig clones the
+        # kernel, so starting before there is a network means failing that job
+        # rather than waiting for one.
+        wants = [ "network-online.target" ];
+        after = [
+          "network-online.target"
+          "nix-daemon.socket"
+        ];
+
+        # git to maintain the kernel mirror, nix to run the builds. Neither is
+        # baked into the package: the mirror is ordinary git, and the nix that
+        # runs a build must be the machine's own.
+        #
+        # The rest are for fuzzing, and none of them are optional there. A build
+        # or a test happens inside a Nix sandbox that brings its own tools;
+        # syz-manager runs here, in this unit, and shells out constantly.
+        path = [
+          pkgs.git
+          config.nix.package
+        ]
+        ++ lib.optionals cfg.fuzz.enable [
+          pkgs.qemu # the VMs
+          pkgs.openssh # ssh and scp into each one, and the key generated at first run
+          pkgs.binutils # addr2line and nm, for symbolising coverage out of vmlinux
+          # gcc is for C reproducers, which syzkaller compiles at *runtime* rather
+          # than at build time. See LIBRARY_PATH below.
+          pkgs.gcc
+        ];
+
+        environment = {
+          HOME = cfg.stateDir;
+          XDG_CACHE_HOME = "${cfg.stateDir}/cache";
+        }
+        // lib.optionalAttrs cfg.fuzz.enable {
+          # BOTH OF THESE ARE ABOUT C REPRODUCERS, and getting either wrong costs
+          # you every one of them without a single error message.
+          #
+          # A crash reported as a syz program is a crash a maintainer cannot act
+          # on; the C reproducer is the artifact that matters. syzkaller builds
+          # them by shelling out to gcc while it runs, so neither of these is
+          # covered by anything pinned at build time.
+          #
+          # LIBRARY_PATH: syzkaller probes `gcc -static` and silently falls back
+          # to a dynamic link when it fails. A dynamically linked reproducer
+          # names a /nix/store ELF interpreter that does not exist inside the
+          # guest, so it fails to exec; syzkaller can only observe that no crash
+          # happened, concludes the bug does not reproduce in C, and throws the
+          # reproducer away. Interpolated rather than passed through
+          # lib.makeLibraryPath, which resolves glibc's "lib" output — the
+          # *dynamic* one — leaving the static libc silently off the path.
+          LIBRARY_PATH = "${pkgs.glibc.static}/lib";
+
+          # CPATH must be empty, and it is set here so that nothing inherits one.
+          # To build a reproducer syzkaller preprocesses its executor header with
+          # `cpp -nostdinc -fdirectives-only` and relies on every #include
+          # failing to resolve. -nostdinc does not clear CPATH, so a non-empty
+          # one gives cpp somewhere to look and turns the expected non-fatal
+          # diagnostic into a fatal error. cpp dies twenty lines in, and because
+          # syzkaller only treats *empty* cpp output as failure it accepts the
+          # truncated header and emits a reproducer with no main(). The daemon
+          # also clears it per-process; this is the belt to that's braces.
+          CPATH = "";
+        };
+
+        serviceConfig = {
+          ExecStart = lib.escapeShellArgs (
+            [
+              (lib.getExe cfg.package)
+              "-state"
+              cfg.stateDir
+              "-remote"
+              cfg.remote
+              "-max-concurrent"
+              (toString cfg.maxConcurrent)
+
+              # Pinned rather than read from NIX_PATH, so that what a rig builds
+              # against is a property of this configuration and not of whatever
+              # channel happens to be registered on the machine.
+              #
+              # Interpolated, not `toString`: interpolation records a store
+              # reference, so the paths are copied to the rig as dependencies of
+              # this unit. `toString` yields the same text with no reference, and
+              # the daemon then starts happily and fails at the first job with a
+              # store path that was never copied.
+              #
+              # One copy of nix/ rather than one per directory, because
+              # kernel-test reads kernel-build's report.py by a relative path —
+              # the two agree on report.json's schema, and sharing the file is
+              # how they go on agreeing. Copied separately, that `..` would climb
+              # out of the store path and find nothing.
+              "-nixpkgs"
+              "${pkgs.path}"
+              "-kernel-build"
+              "${nixDir}/kernel-build"
+              "-kernel-test"
+              "${nixDir}/kernel-test"
+            ]
+            ++ lib.optionals cfg.fuzz.enable [
+              "-kernel-fuzz"
+              "${nixDir}/kernel-fuzz"
+              "-syzkaller"
+              "${syzkallerDir}"
+              "-max-concurrent-fuzz"
+              (toString cfg.fuzz.maxConcurrent)
+              "-max-fuzz-duration"
+              (toString cfg.fuzz.maxDurationSeconds)
+              "-fuzz-vm-cpu"
+              (toString cfg.fuzz.vmCPU)
+              "-fuzz-vm-memory-mb"
+              (toString cfg.fuzz.vmMemoryMB)
+              "-fuzz-host-reserve-mb"
+              (toString cfg.fuzz.hostReserveMB)
+              "-fuzz-host-reserve-cpu"
+              (toString cfg.fuzz.hostReserveCPU)
+              "-fuzz-devices"
+              (lib.concatStringsSep "," cfg.fuzz.allowedDevices)
+            ]
+            ++ lib.optionals (cfg.tokenFile != null) [
+              "-token-file"
+              "%d/token"
+            ]
+          );
+
+          LoadCredential = lib.optional (cfg.tokenFile != null) "token:${cfg.tokenFile}";
+
+          User = user;
+          Group = user;
+
+          Restart = "always";
+          RestartSec = "10s";
+
+          # A kernel build is half an hour of every core. The daemon itself is
+          # idle; it is the builds, run by the nix daemon, that do the work, so
+          # the weight belongs on them and not here.
+          Nice = 5;
+
+          ReadWritePaths = [
             cfg.stateDir
-            "-remote"
-            cfg.remote
-            "-max-concurrent"
-            (toString cfg.maxConcurrent)
+            cfg.buildDir
+          ];
 
-            # Pinned rather than read from NIX_PATH, so that what a rig builds
-            # against is a property of this configuration and not of whatever
-            # channel happens to be registered on the machine.
-            #
-            # Interpolated, not `toString`: interpolation records a store
-            # reference, so the paths are copied to the rig as dependencies of
-            # this unit. `toString` yields the same text with no reference, and
-            # the daemon then starts happily and fails at the first job with a
-            # store path that was never copied.
-            #
-            # One copy of nix/ rather than one per directory, because
-            # kernel-test reads kernel-build's report.py by a relative path —
-            # the two agree on report.json's schema, and sharing the file is
-            # how they go on agreeing. Copied separately, that `..` would climb
-            # out of the store path and find nothing.
-            "-nixpkgs"
-            "${pkgs.path}"
-            "-kernel-build"
-            "${nixDir}/kernel-build"
-            "-kernel-test"
-            "${nixDir}/kernel-test"
-          ]
-          ++ lib.optionals cfg.fuzz.enable [
-            "-kernel-fuzz"
-            "${nixDir}/kernel-fuzz"
-            "-syzkaller"
-            "${syzkallerDir}"
-            "-max-concurrent-fuzz"
-            (toString cfg.fuzz.maxConcurrent)
-            "-max-fuzz-duration"
-            (toString cfg.fuzz.maxDurationSeconds)
-            "-fuzz-vm-cpu"
-            (toString cfg.fuzz.vmCPU)
-            "-fuzz-vm-memory-mb"
-            (toString cfg.fuzz.vmMemoryMB)
-            "-fuzz-host-reserve-mb"
-            (toString cfg.fuzz.hostReserveMB)
-            "-fuzz-host-reserve-cpu"
-            (toString cfg.fuzz.hostReserveCPU)
-            "-fuzz-devices"
-            (lib.concatStringsSep "," cfg.fuzz.allowedDevices)
-          ]
-          ++ lib.optionals (cfg.tokenFile != null) [
-            "-token-file"
-            (toString cfg.tokenFile)
-          ]
-        );
+          # Deliberately not DynamicUser, unlike the kiosk server: this daemon
+          # owns persistent state and its GC roots have to survive a restart
+          # under the same uid.
+          CapabilityBoundingSet = [ "" ];
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          ProtectHome = true;
+          ProtectClock = true;
+          ProtectControlGroups = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectSystem = "strict";
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          LockPersonality = true;
+          SystemCallArchitectures = "native";
+          SystemCallFilter = [ "@system-service" ];
 
-        User = user;
-        Group = user;
+          # AF_UNIX for the nix daemon socket, AF_INET/AF_INET6 to serve the API
+          # and to let git fetch a commit the mirror does not have.
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+          ];
+        }
+        // lib.optionalAttrs cfg.fuzz.enable {
+          # A test job's VM is started by Nix, inside a sandbox that Nix binds
+          # /dev/kvm into. A fuzzing run's VMs are started *here*, by this unit,
+          # so the unit needs the device itself. Without it QEMU falls back to
+          # emulating every instruction: the pool boots, the fuzzer runs, and the
+          # execution rate is roughly fifty times lower than it should be, with
+          # nothing anywhere saying why.
+          DeviceAllow = [ "/dev/kvm rw" ];
+          SupplementaryGroups = [ "kvm" ];
 
-        Restart = "always";
-        RestartSec = "10s";
-
-        # A kernel build is half an hour of every core. The daemon itself is
-        # idle; it is the builds, run by the nix daemon, that do the work, so
-        # the weight belongs on them and not here.
-        Nice = 5;
-
-        ReadWritePaths = [
-          cfg.stateDir
-          cfg.buildDir
-        ];
-
-        # Deliberately not DynamicUser, unlike the kiosk server: this daemon
-        # owns persistent state and its GC roots have to survive a restart
-        # under the same uid.
-        CapabilityBoundingSet = [ "" ];
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectHome = true;
-        ProtectClock = true;
-        ProtectControlGroups = true;
-        ProtectKernelLogs = true;
-        ProtectKernelModules = true;
-        ProtectKernelTunables = true;
-        ProtectSystem = "strict";
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        SystemCallArchitectures = "native";
-        SystemCallFilter = [ "@system-service" ];
-
-        # AF_UNIX for the nix daemon socket, AF_INET/AF_INET6 to serve the API
-        # and to let git fetch a commit the mirror does not have.
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
-      }
-      // lib.optionalAttrs cfg.fuzz.enable {
-        # A test job's VM is started by Nix, inside a sandbox that Nix binds
-        # /dev/kvm into. A fuzzing run's VMs are started *here*, by this unit,
-        # so the unit needs the device itself. Without it QEMU falls back to
-        # emulating every instruction: the pool boots, the fuzzer runs, and the
-        # execution rate is roughly fifty times lower than it should be, with
-        # nothing anywhere saying why.
-        DeviceAllow = [ "/dev/kvm rw" ];
-        SupplementaryGroups = [ "kvm" ];
-
-        MemoryHigh = lib.mkIf (cfg.fuzz.memoryHigh != null) cfg.fuzz.memoryHigh;
+          MemoryHigh = lib.mkIf (cfg.fuzz.memoryHigh != null) cfg.fuzz.memoryHigh;
+        };
       };
-    };
-  };
+    })
+  ];
 }

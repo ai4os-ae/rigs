@@ -26,4 +26,10 @@
       type = "ed25519";
     }
   ];
+
+  # Pre-seeding that key at install (`--extra-files`) carries the seed
+  # directory's mode over, and a 700 /etc/ssh locks every non-root account
+  # out: sshd reads authorized_keys.d/<user> as that user, finds nothing, and
+  # refuses a key root accepts. desktop-01 was installed this way.
+  systemd.tmpfiles.rules = [ "z /etc/ssh 0755 root root -" ];
 }

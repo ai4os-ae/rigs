@@ -44,6 +44,16 @@ let
   };
 in
 {
+  options.rigs.rig.lidAlarm = lib.mkOption {
+    description = ''
+      Beep when the lid is shut, as well as when the rig is off mains. Off
+      for a laptop rig that is meant to run closed — on a dock or a cable,
+      with nobody reading its panel.
+    '';
+    type = lib.types.bool;
+    default = true;
+  };
+
   options.rigs.rig.isLaptop = lib.mkOption {
     description = ''
       This rig is a laptop: it has a battery, a lid, and a speaker, and the
@@ -65,7 +75,7 @@ in
     environment.systemPackages = [ alarm ];
 
     systemd.services.rig-alarm = {
-      description = "Beep while this laptop rig is unplugged or its lid is shut";
+      description = "Beep while this laptop rig is unplugged (or, with lidAlarm, its lid is shut)";
 
       wantedBy = [ "multi-user.target" ];
       after = [
@@ -75,6 +85,7 @@ in
 
       serviceConfig = {
         ExecStart = lib.getExe alarm;
+        Environment = lib.optional (!cfg.lidAlarm) "RIG_ALARM_LID=0";
 
         # The alarm is only useful if it is running at the moment somebody
         # unplugs the rig, which is not a moment anybody is watching for.

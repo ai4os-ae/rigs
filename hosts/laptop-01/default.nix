@@ -41,17 +41,21 @@
     rig.enable = true;
     autoupgrade.enable = true;
 
-    # Kernel build jobs, over the mesh. 12 threads and 32GB, which is one
-    # kernel build at a time. The fleet's broker is on desktop-01.
+    # Kernel build jobs. 12 threads and 32GB, which is one kernel build at a
+    # time. The fleet's broker is on desktop-01, which reaches this rig at its
+    # campus address rather than over the mesh, so the port is open there
+    # too, behind the fleet's token.
     buildd = {
       enable = true;
       maxConcurrent = 1;
+      openFirewall = true;
     };
 
     # A Latitude on a desk in a shared room: the charger is the nearest one to
-    # borrow and the lid is the obvious thing to close on a machine that looks
-    # idle. Both now beep until they are put back.
+    # borrow, and pulling it beeps until it is put back. Closing the lid does
+    # not: since 2026-11-11 it is fine for this rig to run shut.
     rig.isLaptop = true;
+    rig.lidAlarm = false;
 
     # The laptop's own panel, which is otherwise a lid nobody opens: cage takes
     # tty1 at boot and shows the rig's name. No getty, no login prompt.

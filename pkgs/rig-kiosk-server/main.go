@@ -12,7 +12,6 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"html/template"
 	"log"
 	"net"
@@ -45,18 +44,33 @@ func main() {
 	idle := flag.Duration("idle", 10*time.Minute, "how long without input before the screensaver takes over")
 	screensaver := flag.Duration("screensaver", time.Minute, "how long the screensaver runs; zero to leave it off")
 	buildd := flag.String("buildd", "", "base URL of this rig's build daemon; empty leaves it off the job board")
-	var peers []Rig
-	flag.Func("peer", "another rig to put on the job board, as name=url; repeatable", func(value string) error {
-		name, url, ok := strings.Cut(value, "=")
-		if !ok || name == "" || url == "" {
-			return fmt.Errorf("%q is not name=url", value)
-		}
-		peers = append(peers, Rig{Name: name, URL: strings.TrimSuffix(url, "/")})
-		return nil
-	})
+	peersPath := flag.String("peers", "", "JSON file of other rigs to put on the job board, [{\"name\":…,\"url\":…}]; a file because a URL may be a secret")
+	tokenPath := flag.String("token-file", "", "file holding the bearer token the build daemons require; empty sends none")
 	flag.Parse()
 
 	log.SetFlags(0) // The journal already stamps every line.
+
+	var peers []Rig
+	if *peersPath != "" {
+		raw, err := os.ReadFile(*peersPath)
+		if err != nil {
+			log.Fatalf("reading the peers: %v", err)
+		}
+		if err := json.Unmarshal(raw, &peers); err != nil {
+			log.Fatalf("parsing the peers: %v", err)
+		}
+		for i := range peers {
+			peers[i].URL = strings.TrimSuffix(peers[i].URL, "/")
+		}
+	}
+
+	if *tokenPath != "" {
+		raw, err := os.ReadFile(*tokenPath)
+		if err != nil {
+			log.Fatalf("reading the build daemon token: %v", err)
+		}
+		builddClient.Transport = bearer{token: strings.TrimSpace(string(raw)), next: http.DefaultTransport}
+	}
 
 	text := Text{
 		Heading:       *heading,

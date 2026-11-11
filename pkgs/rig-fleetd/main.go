@@ -43,6 +43,7 @@ func main() {
 	apiKeysPath := flag.String("api-keys", "", "file of API keys, one per line (required)")
 	state := flag.String("state", "/var/lib/rig/fleetd", "directory for the placement hint file")
 	poll := flag.Duration("poll", 10*time.Second, "how often to ask each rig how it is doing")
+	builddToken := flag.String("buildd-token", "", "file holding the bearer token the rigs' build daemons require; empty sends none")
 	flag.Parse()
 
 	log.SetFlags(0) // The journal already stamps every line.
@@ -59,6 +60,17 @@ func main() {
 	keys, err := loadAPIKeys(*apiKeysPath)
 	if err != nil {
 		log.Fatalf("reading API keys: %v", err)
+	}
+
+	if *builddToken != "" {
+		raw, err := os.ReadFile(*builddToken)
+		if err != nil {
+			log.Fatalf("reading the build daemon token: %v", err)
+		}
+		// Every request this process makes is to a rig — the status poll,
+		// placement, listing and the job proxy alike — so the token goes on
+		// the default transport rather than on each of them.
+		http.DefaultTransport = bearer{token: strings.TrimSpace(string(raw)), next: http.DefaultTransport}
 	}
 
 	if err := os.MkdirAll(*state, 0o750); err != nil {
@@ -146,6 +158,18 @@ func authenticated(keys [][]byte, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// bearer adds the build daemons' token to every outgoing request.
+type bearer struct {
+	token string
+	next  http.RoundTripper
+}
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return b.next.RoundTrip(r)
 }
 
 func listener(addr string) (net.Listener, error) {
@@ -489,7 +513,8 @@ func (s *server) forward(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL.RawQuery = r.URL.RawQuery
 			pr.Out.Host = target.Host
 			// The client's key authenticates it to this service and says
-			// nothing to a rig. Forwarding it would leak it onto the mesh.
+			// nothing to a rig. Forwarding it would leak it onto the mesh;
+			// the rig's own token is added by the transport instead.
 			pr.Out.Header.Del("Authorization")
 		},
 		// Flush as it arrives: without this, following a log would deliver

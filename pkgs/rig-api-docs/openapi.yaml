@@ -81,8 +81,11 @@ info:
     valid against bytes fetched from another.
 
 servers:
-  - url: https://rigs.fleeti.ae
-    description: The fleet broker
+  # Relative, so it resolves against wherever this spec was loaded from: the
+  # docs are served by the broker's own host, on whichever address the reader
+  # reached it by.
+  - url: /
+    description: The fleet broker serving this page
 
 security:
   - bearerAuth: []

@@ -212,6 +212,11 @@ in
     # systemd binds the port at sockets.target, well before the compositor
     # starts, so the browser's first connection is queued instead of refused
     # and the rig never comes up displaying a connection-error page.
+    sops.templates."kiosk/peers.json" = mkIf (cfg.peers != [ ]) {
+      content = builtins.toJSON cfg.peers;
+      restartUnits = [ "rig-kiosk-server.service" ];
+    };
+
     systemd.sockets.rig-kiosk-server = {
       description = "Socket for the rig kiosk status page";
       wantedBy = [ "sockets.target" ];
@@ -251,11 +256,23 @@ in
             "-buildd"
             cfg.buildd
           ]
-          ++ lib.concatMap (peer: [
-            "-peer"
-            "${peer.name}=${peer.url}"
-          ]) cfg.peers
+          ++ lib.optionals (cfg.peers != [ ]) [
+            "-peers"
+            "%d/peers"
+          ]
+          ++ lib.optionals (config.rigs.buildd.tokenFile != null) [
+            "-token-file"
+            "%d/buildd-token"
+          ]
         );
+
+        # A file rather than arguments, and rendered by sops, because a peer's
+        # address may be a secret; see rigs.fleetd.members.
+        LoadCredential =
+          lib.optional (cfg.peers != [ ]) "peers:${config.sops.templates."kiosk/peers.json".path}"
+          ++ lib.optional (
+            config.rigs.buildd.tokenFile != null
+          ) "buildd-token:${config.rigs.buildd.tokenFile}";
 
         Restart = "always";
         RestartSec = "2s";

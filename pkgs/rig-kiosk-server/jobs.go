@@ -12,11 +12,23 @@ import (
 )
 
 // Rig is a build daemon whose jobs go on the board: this rig's own, on
-// loopback, and on the rig that runs the fleet broker, every other member's
-// over the mesh.
+// loopback, and on the rig that runs the fleet broker, every other member's,
+// over the mesh or the campus network.
 type Rig struct {
-	Name string
-	URL  string
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// bearer adds the build daemons' token to every request to one.
+type bearer struct {
+	token string
+	next  http.RoundTripper
+}
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return b.next.RoundTrip(r)
 }
 
 // RigJobs is one rig's panel on the board.

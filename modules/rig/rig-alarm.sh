@@ -37,6 +37,8 @@ VOLUME="${RIG_ALARM_VOLUME:-85}"
 # machines that expose neither it is PCM.
 CONTROLS="${RIG_ALARM_CONTROLS:-Master Speaker PCM Headphone}"
 DRY_RUN="${RIG_ALARM_DRY_RUN:-}"
+# 0 to stop beeping for a shut lid, on a laptop rig that is meant to run closed.
+LID="${RIG_ALARM_LID:-1}"
 
 on_battery() {
   local supply kind online status mains=0
@@ -112,7 +114,7 @@ main() {
     if on_battery; then
       why="unplugged"
     fi
-    if lid_closed; then
+    if [ "$LID" = 1 ] && lid_closed; then
       why="${why:+$why and }lid closed"
     fi
 

@@ -49,18 +49,20 @@
       enable = true;
       apiKeysFile = config.sops.secrets."fleetd/api-keys".path;
 
-      # rigs.fleeti.ae is served by hisn, which proxies to this port over the
-      # mesh. hisn is the lighthouse and a public VPS, so it holds neither
-      # `trusted` nor `ai4os`; this admits it to the broker and nothing else.
-      reverseProxy = "hisn";
+      # Served on the campus wire, at whatever address eno1 is leased, so it
+      # is reachable on the corporate network and VPN and not from the
+      # internet. It was published at rigs.fleeti.ae through hisn until
+      # 2026-11-11; leave reverseProxy unset unless that is wanted back.
+      lanInterface = "eno1";
       members = [
         {
           name = "desktop-01";
           url = "http://10.10.0.62:9000";
         }
+        # At its campus address, which is kept in sops rather than here.
         {
           name = "laptop-01";
-          url = "http://10.10.0.60:9000";
+          url = "http://${config.sops.placeholder."fleetd/laptop-01-address"}:9000";
         }
       ];
     };
@@ -92,6 +94,9 @@
       owner = "rig-fleetd";
       restartUnits = [ "rig-fleetd.service" ];
     };
+
+    # Only ever read through the members and kiosk templates.
+    "fleetd/laptop-01-address".sopsFile = ../../secrets/desktop-01.yaml;
 
     "nebula/crt" = {
       sopsFile = ../../secrets/desktop-01.yaml;

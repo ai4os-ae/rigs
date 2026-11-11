@@ -43,7 +43,7 @@ nix/
   kernel-build/    parameterised two-stage Linux kernel builds
   kernel-test/     booting one of those under QEMU and running tests in it
 pkgs/
-  rig-api-docs/    OpenAPI spec + Swagger UI, served as the public root
+  rig-api-docs/    OpenAPI spec + Swagger UI, served at the broker's root
   rig-buildd/      the job daemon itself (Go, stdlib only)
   rig-fleetd/      the fleet broker
   rig-kiosk-server/
@@ -263,9 +263,15 @@ There is no central server and no agent polling one. Rigs have fixed mesh
 addresses and already accept inbound connections from `ai4os` and `trusted`, so
 a client connects to the rig it wants and picks between rigs itself using
 `/v1/status`. Nebula has authenticated and encrypted the connection before the
-daemon sees it, and the host firewall trusts `sifr0` and nothing else, so the
-API is not exposed to whatever network the rig has joined.
-`rigs.buildd.tokenFile` adds a bearer token for when that stops being enough.
+daemon sees it, and by default the host firewall trusts `sifr0` and nothing
+else.
+
+Every request also carries the fleet's bearer token, `buildd/token` in
+`secrets/all.yaml`, because one rig is not only on the mesh: the broker reaches
+laptop-01 at its campus address, kept in sops, where `rigs.buildd.openFirewall`
+opens the port. The broker and the kiosk send the token themselves. Anyone
+calling a daemon directly, as in the examples below, adds
+`-H "Authorization: Bearer $(sops decrypt --extract '["buildd"]["token"]' secrets/all.yaml)"`.
 
 | Method   | Path                              |                                               |
 |----------|-----------------------------------|-----------------------------------------------|
@@ -634,11 +640,9 @@ it. `rig-fleetd` puts a single endpoint in front of all of them: it decides
 which rig a job runs on, forwards it, and proxies everything afterwards, so a
 client sees a fleet rather than a list of machines.
 
-Unlike a rig, it is meant to be **published** — reverse-proxied from a host
-with a public address — so every request carries an API key and there is no
-unauthenticated path through it, not even `/v1/status`, which would otherwise
-enumerate the fleet. It still listens on the mesh only; exposing it is the
-reverse proxy's job.
+Unlike a rig, it is meant to be reached by people who are not on the mesh, so
+every request carries an API key and there is no unauthenticated path through
+it, not even `/v1/status`, which would otherwise enumerate the fleet.
 
 | Method   | Path                       |                                          |
 |----------|----------------------------|------------------------------------------|
@@ -647,11 +651,12 @@ reverse proxy's job.
 | `GET`    | `/v1/rigs`                 | the fleet: liveness, system, queue, disk |
 | `GET`    | `/v1/status`               | the broker itself                        |
 
-Browsable at the root of that name: `pkgs/rig-api-docs` builds a Swagger UI and
-the OpenAPI spec into a directory, which the publishing host serves as the
-vhost's root while `/v1/` continues to proxy. The docs are unauthenticated —
-somebody who lands on the fleet's one public name should find out what it does
-rather than a `401` — and everything they describe is not.
+Browsable at the root of the same port 80: `pkgs/rig-api-docs` builds a Swagger
+UI and the OpenAPI spec into a directory, which nginx serves as the root while
+`/v1/` goes to the broker. The spec's server is relative, so try-it-out talks to
+whichever address the page was opened on. The docs are unauthenticated —
+somebody who lands on the page should find out what it does rather than a
+`401` — and everything they describe is not.
 
 The spec is written by hand and checked in, so it is reviewed like the code it
 describes rather than generated from it and believed; the build parses it, so a
@@ -705,10 +710,16 @@ a key takes effect without anybody remembering to.
 
 ### Publishing it
 
-The broker is published at **`https://rigs.fleeti.ae`**, served by `hisn` and
-proxied to `10.10.0.60:9100` over the mesh.
+The broker is served on port 80 of desktop-01's campus ethernet address, so it
+is reachable on the corporate network and VPN and not from the internet.
+`rigs.fleetd.lanInterface = "eno1"` opens port 80 on that interface alone and
+serves the API docs at `/` and the broker at `/v1/`. The address is a campus
+DHCP lease and is deliberately not recorded here. On the mesh it is `http://10.10.0.62/` (or
+`:9100`, the broker itself).
 
-Two halves, in two repositories, and it is a 504 without both:
+Until 2026-11-11 it was also public at `https://rigs.fleeti.ae`, through
+`hisn`. That is switched off here by leaving `reverseProxy` unset. To bring it
+back, there are two halves, in two repositories, and it is a 504 without both:
 
 - **The vhost**, on `hisn`, which is configured from the personal dotfiles
   repository and not from here.
@@ -745,6 +756,9 @@ One episode of beeping lasts five minutes and then goes quiet, so a rig nobody
 came to is not left making a noise all weekend — it keeps watching, and a new
 fault, or the same one clearing and returning, gets a fresh five minutes.
 `RIG_ALARM_TIMEOUT` in the unit's environment changes that; 0 never stops.
+
+`rigs.rig.lidAlarm = false` keeps the mains alarm and drops the lid one, for a
+laptop meant to run shut. laptop-01 is set that way.
 
 To check what the sensors say without waiting for a beep:
 
